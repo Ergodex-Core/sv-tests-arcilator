@@ -78,13 +78,13 @@ class circt_verilog_arc(BaseRunner):
 
         script_path = os.path.join(tmp_dir, "run_arc.sh")
         with open(script_path, "w", encoding="utf-8") as script:
-            script.write("#!/bin/sh\n")
+            script.write("#!/usr/bin/env bash\n")
             script.write("set -euo pipefail\n")
             script.write(self._format_cmd(circt_cmd) + "\n")
             script.write(self._format_cmd(arc_cmd) + "\n")
         os.chmod(script_path, 0o755)
 
-        self.cmd = ["sh", script_path]
+        self.cmd = [script_path]
 
     @staticmethod
     def _format_cmd(cmd):
