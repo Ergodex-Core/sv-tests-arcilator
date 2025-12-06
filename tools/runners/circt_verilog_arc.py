@@ -21,7 +21,8 @@ class circt_verilog_arc(BaseRunner):
         super().__init__(
             name="circt-verilog-arc",
             executable="circt-verilog",
-            supported_features={"elaboration"},
+            # Accept parsing so parsing-only tests still exercise the pipeline.
+            supported_features={"parsing", "elaboration"},
         )
         self.arc_executable = "arcilator"
         self.submodule = "third_party/tools/circt-verilog"
