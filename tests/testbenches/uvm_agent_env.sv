@@ -14,6 +14,7 @@
 :type: simulation elaboration parsing
 :timeout: 300
 :unsynthesizable: 1
+:files: support/uvm_stub_pkg.sv testbenches/uvm_agent_env.sv
 */
 
 import uvm_pkg::*;

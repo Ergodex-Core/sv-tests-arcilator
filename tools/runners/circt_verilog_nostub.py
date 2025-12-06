@@ -14,7 +14,7 @@ import os
 from BaseRunner import BaseRunner
 
 
-class circt_verilog(BaseRunner):
+class circt_verilog_nostub(BaseRunner):
     def __init__(
         self,
         name="circt-verilog",
@@ -45,20 +45,6 @@ class circt_verilog(BaseRunner):
         tags = params["tags"]
         incdirs = list(params["incdirs"])
         files = list(params["files"])
-
-        support_dir = os.path.join(os.environ.get("TESTS_DIR", ""), "support")
-        if "uvm" in tags and os.path.isdir(support_dir):
-            incdirs = [
-                support_dir if incdir.endswith("third_party/tests/uvm/src") else incdir
-                for incdir in incdirs
-            ]
-            if support_dir not in incdirs:
-                incdirs.insert(0, support_dir)
-            stub_pkg = os.path.join(support_dir, "uvm_stub_pkg.sv")
-            files = [
-                stub_pkg if os.path.basename(path) == "uvm_pkg.sv" else path
-                for path in files
-            ]
 
         # Setting for additional include search paths.
         for incdir in incdirs:
@@ -105,4 +91,5 @@ class circt_verilog(BaseRunner):
             if 'bp_lce' in name or 'bp_uce' or 'bp_multicore' in name:
                 self.cmd += ["--parse-only"]
 
+        self.cmd += ["--ir-moore"]
         self.cmd += files

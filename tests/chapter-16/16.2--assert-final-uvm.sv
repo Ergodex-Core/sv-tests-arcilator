@@ -14,6 +14,7 @@
 :tags: uvm uvm-assertions
 :timeout: 300
 :unsynthesizable: 1
+:files: support/uvm_stub_pkg.sv chapter-16/16.2--assert-final-uvm.sv
 */
 
 import uvm_pkg::*;

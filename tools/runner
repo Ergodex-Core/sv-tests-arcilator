@@ -183,7 +183,13 @@ elif test_params[
     logger.warning(
         "should_fail tag should be replaced with should_fail_because.")
 
-test_params['files'] = test_params['files'].split()
+files = []
+for entry in test_params['files'].split():
+    if os.path.isabs(entry):
+        files.append(entry)
+    else:
+        files.append(os.path.abspath(os.path.join(dirs['tests'], entry)))
+test_params['files'] = files
 test_params['incdirs'] = list(
     map(
         lambda x: os.path.abspath(os.path.join(dirs['tests'], x)),
@@ -197,7 +203,13 @@ if test_params['mode'] is None:
 
     sys.exit(0)
 
+has_uvm_stub = any(
+    os.path.basename(path) == "uvm_stub_pkg.sv"
+    for path in test_params['files'])
+
 for key in libs.keys():
+    if key == 'uvm' and has_uvm_stub:
+        continue
     if key in test_params['tags']:
         test_params['files'] = [
             os.path.abspath(os.path.join(dirs['third_party'], p))
@@ -207,6 +219,11 @@ for key in libs.keys():
             os.path.abspath(os.path.join(dirs['third_party'], p))
             for p in libs[key]['incdirs']
         ] + test_params['incdirs']
+
+if has_uvm_stub:
+    stub_incdir = os.path.abspath(os.path.join(dirs['tests'], 'support'))
+    if stub_incdir not in test_params['incdirs']:
+        test_params['incdirs'].append(stub_incdir)
 
 test_params['defines'] = test_params['defines'].split()
 

@@ -9,7 +9,10 @@
 #
 # SPDX-License-Identifier: ISC
 
-import psutil
+try:
+    import psutil  # type: ignore
+except ModuleNotFoundError:
+    psutil = None
 import resource
 import shutil
 import signal
@@ -19,12 +22,21 @@ import re
 
 
 def kill_child_processes(parent_pid, sig=signal.SIGKILL):
+    if psutil is None:
+        # Best-effort fallback without psutil; try to terminate the whole
+        # process group so test runs still get cleaned up on timeout.
+        try:
+            os.killpg(os.getpgid(parent_pid), sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            pass
+        return
     try:
         parent = psutil.Process(parent_pid)
     except psutil.NoSuchProcess:
         return
-    children = parent.children(recursive=True)
-    for process in children:
+    for process in parent.children(recursive=True):
         process.send_signal(sig)
 
 
