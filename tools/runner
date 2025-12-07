@@ -206,10 +206,15 @@ if test_params['mode'] is None:
 has_uvm_stub = any(
     os.path.basename(path) == "uvm_stub_pkg.sv"
     for path in test_params['files'])
+# Drop the stubbed UVM package from the test file list; we want the real UVM
+# library injected below instead of the lightweight placeholder.
+if has_uvm_stub:
+    test_params['files'] = [
+        path for path in test_params['files']
+        if os.path.basename(path) != "uvm_stub_pkg.sv"
+    ]
 
 for key in libs.keys():
-    if key == 'uvm' and has_uvm_stub:
-        continue
     if key in test_params['tags']:
         test_params['files'] = [
             os.path.abspath(os.path.join(dirs['third_party'], p))
@@ -219,11 +224,6 @@ for key in libs.keys():
             os.path.abspath(os.path.join(dirs['third_party'], p))
             for p in libs[key]['incdirs']
         ] + test_params['incdirs']
-
-if has_uvm_stub:
-    stub_incdir = os.path.abspath(os.path.join(dirs['tests'], 'support'))
-    if stub_incdir not in test_params['incdirs']:
-        test_params['incdirs'].append(stub_incdir)
 
 test_params['defines'] = test_params['defines'].split()
 
