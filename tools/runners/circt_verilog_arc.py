@@ -54,6 +54,9 @@ class circt_verilog_arc(BaseRunner):
                 circt_cmd.extend(["-D", define])
 
         circt_cmd += ["--timescale=1ns/1ns", "--single-unit"]
+        # Request Moore IR so the elaborated design reaches Arc instead of
+        # emitting plain Verilog.
+        circt_cmd.append("--ir-moore")
         circt_cmd += [
             "-Wno-implicit-conv",
             "-Wno-index-oob",
