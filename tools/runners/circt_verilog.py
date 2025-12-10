@@ -10,6 +10,7 @@
 # SPDX-License-Identifier: ISC
 
 import os
+import shlex
 
 from BaseRunner import BaseRunner
 
@@ -29,15 +30,15 @@ class circt_verilog(BaseRunner):
         self.url = f"https://github.com/llvm/circt/tree/{self.get_commit()}"
 
     def prepare_run_cb(self, tmp_dir, params):
-        self.cmd = [self.executable]
+        circt_cmd = [self.executable]
         mode = params["mode"]
 
         # To process the input: The preprocessor indicates only run and print preprocessed files;
         # parsing means only lint the input, without elaboration and mapping to CIRCT IR.
         if mode == "preprocessing":
-            self.cmd += ["-E"]
+            circt_cmd += ["-E"]
         elif mode == "parsing":
-            self.cmd += ["--parse-only"]
+            circt_cmd += ["--parse-only"]
 
         # The following options are mostly borrowed from the Slang runner, since circt-verilog
         # uses Slang as its Verilog frontend.
@@ -62,21 +63,21 @@ class circt_verilog(BaseRunner):
 
         # Setting for additional include search paths.
         for incdir in incdirs:
-            self.cmd.extend(["-I", incdir])
+            circt_cmd.extend(["-I", incdir])
 
         # Setting for macro or value defines in all source files.
         for define in params["defines"]:
-            self.cmd.extend(["-D", define])
+            circt_cmd.extend(["-D", define])
 
         # Borrow from slang config for some modules which get errors without a default timescale.
-        self.cmd += ["--timescale=1ns/1ns"]
+        circt_cmd += ["--timescale=1ns/1ns"]
 
         # Combine all input files for the tests that need a single compilation unit.
-        self.cmd += ["--single-unit"]
+        circt_cmd += ["--single-unit"]
 
         # Disable certain warnings to make the output less noisy.
         # Some tests access array elements out of bounds. Make that not an error.
-        self.cmd += [
+        circt_cmd += [
             "-Wno-implicit-conv",
             "-Wno-index-oob",
             "-Wno-range-oob",
@@ -85,24 +86,43 @@ class circt_verilog(BaseRunner):
 
         top = self.get_top_module_or_guess(params)
         if top is not None:
-            self.cmd += ["--top=" + top]
+            circt_cmd += ["--top=" + top]
 
         # The Ariane core does not build correctly if VERILATOR is not defined -- it will attempt
         # to reference nonexistent modules, for example.
         if "ariane" in tags:
-            self.cmd += ["-DVERILATOR"]
+            circt_cmd += ["-DVERILATOR"]
 
         # black-parrot has syntax errors where variables are used before they are declared.
         # This is being fixed upstream, but it might take a long time to make it to master
         # so this works around the problem in the meantime.
         if "black-parrot" in tags and mode != "parsing":
-            self.cmd += ["--allow-use-before-declare"]
+            circt_cmd += ["--allow-use-before-declare"]
 
             # These tests simply cannot be elaborated because they target
             # modules that have invalid parameter values for a top-level module,
             # or have an invalid configuration that results in $fatal calls.
             name = params["name"]
             if 'bp_lce' in name or 'bp_uce' or 'bp_multicore' in name:
-                self.cmd += ["--parse-only"]
+                circt_cmd += ["--parse-only"]
 
-        self.cmd += files
+        circt_cmd += files
+
+        # Wrap the invocation in a short script so we can emit stage markers
+        # that the log sweep scripts can parse for stuck-phase reporting.
+        script_path = os.path.join(tmp_dir, "run_circt_verilog.sh")
+        with open(script_path, "w", encoding="utf-8") as script:
+            script.write("#!/usr/bin/env bash\n")
+            script.write("set -uo pipefail\n")
+            script.write('echo "[stage] slang+import (circt-verilog -> moore)"\n')
+            script.write(self._format_cmd(circt_cmd) + "\n")
+            script.write("circt_rc=$?\n")
+            script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
+            script.write("exit ${circt_rc}\n")
+        os.chmod(script_path, 0o755)
+
+        self.cmd = [script_path]
+
+    @staticmethod
+    def _format_cmd(cmd):
+        return " ".join(shlex.quote(arg) for arg in cmd)

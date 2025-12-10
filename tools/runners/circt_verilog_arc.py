@@ -35,6 +35,8 @@ class circt_verilog_arc(BaseRunner):
 
     def prepare_run_cb(self, tmp_dir, params):
         ir_path = os.path.join(tmp_dir, "imported.mlir")
+        arc_mlir_path = os.path.join(tmp_dir, "imported.arc.mlir")
+        llvm_path = os.path.join(tmp_dir, "imported.ll")
         circt_cmd = [self.executable]
         mode = params["mode"]
 
@@ -78,14 +80,42 @@ class circt_verilog_arc(BaseRunner):
         circt_cmd += ["-o", ir_path]
         circt_cmd += files
 
-        arc_cmd = [self.arc_executable, ir_path]
+        arc_mlir_cmd = f"{self._format_cmd([self.arc_executable, '--emit-mlir', ir_path])} > {shlex.quote(arc_mlir_path)}"
+        arc_emit_cmd = f"{self._format_cmd([self.arc_executable, '--emit-llvm', ir_path])} > {shlex.quote(llvm_path)}"
 
         script_path = os.path.join(tmp_dir, "run_arc.sh")
         with open(script_path, "w", encoding="utf-8") as script:
             script.write("#!/usr/bin/env bash\n")
-            script.write("set -euo pipefail\n")
+            # Keep pipefail/undefined var safety, but allow us to capture
+            # per-stage return codes instead of exiting early.
+            script.write("set -uo pipefail\n")
+            script.write('echo "[stage] slang+import (circt-verilog -> moore)"\n')
             script.write(self._format_cmd(circt_cmd) + "\n")
-            script.write(self._format_cmd(arc_cmd) + "\n")
+            script.write("circt_rc=$?\n")
+            script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
+            script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
+            script.write(f'if [[ -f "{ir_path}" ]]; then\n')
+            script.write(f'  echo "[artifact] imported.mlir path={ir_path}"\n')
+            script.write(f'  head -n 120 "{ir_path}"\n')
+            script.write("fi\n")
+            script.write('echo "[stage] arc pipeline (convert-to-arcs / emit-mlir)"\n')
+            script.write(arc_mlir_cmd + "\n")
+            script.write("arc_mlir_rc=$?\n")
+            script.write('echo "[stage] arc emit-mlir rc=${arc_mlir_rc}"\n')
+            script.write("if [[ ${arc_mlir_rc} -ne 0 ]]; then exit ${arc_mlir_rc}; fi\n")
+            script.write(f'if [[ -f "{arc_mlir_path}" ]]; then\n')
+            script.write(f'  echo "[artifact] imported.arc.mlir path={arc_mlir_path}"\n')
+            script.write(f'  head -n 120 "{arc_mlir_path}"\n')
+            script.write("fi\n")
+            script.write('echo "[stage] arc lower-to-llvm"\n')
+            script.write(arc_emit_cmd + "\n")
+            script.write("arc_emit_rc=$?\n")
+            script.write('echo "[stage] arc emit-llvm rc=${arc_emit_rc}"\n')
+            script.write(f'if [[ -f "{llvm_path}" ]]; then\n')
+            script.write(f'  echo "[artifact] imported.ll path={llvm_path}"\n')
+            script.write(f'  head -n 80 "{llvm_path}"\n')
+            script.write("fi\n")
+            script.write("exit ${arc_emit_rc}\n")
         os.chmod(script_path, 0o755)
 
         self.cmd = [script_path]
