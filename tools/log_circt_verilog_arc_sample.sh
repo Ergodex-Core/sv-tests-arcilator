@@ -11,6 +11,7 @@ TEST_LIMIT=${TEST_LIMIT:-5}
 # We run sequentially while scanning the list until we find TEST_LIMIT cases
 # that produce a non-empty Arc MLIR artifact.
 JOBS=1
+MAX_SCAN=${MAX_SCAN:-60} # cap the number of attempts to avoid unbounded runs
 TEST_SELECTOR=${TEST_SELECTOR:-pass} # pass|fail|near|all
 
 mkdir -p "$LOG_ROOT" "$TMP_ARCHIVE_ROOT"
@@ -87,7 +88,9 @@ run_one() {
 export -f run_one
 
 found=0
+scanned=0
 for t in "${TESTS[@]}"; do
+  ((scanned++))
   run_one "$t"
   stem="${t//\//__}"
   arc_mlir="$LOG_ROOT/$stem.imported.arc.mlir"
@@ -100,6 +103,10 @@ for t in "${TESTS[@]}"; do
     rm -rf "$TMP_ARCHIVE_ROOT/$stem"
   fi
   if [[ $found -ge $TEST_LIMIT ]]; then
+    break
+  fi
+  if [[ $scanned -ge $MAX_SCAN ]]; then
+    echo "Hit MAX_SCAN=$MAX_SCAN without finding $TEST_LIMIT successes" >&2
     break
   fi
 done
