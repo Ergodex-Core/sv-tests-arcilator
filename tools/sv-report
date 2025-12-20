@@ -9,8 +9,16 @@
 #
 # SPDX-License-Identifier: ISC
 
-from pygments.formatters import HtmlFormatter
-from pygments import lexers, highlight
+try:
+    from pygments.formatters import HtmlFormatter
+    from pygments import lexers, highlight
+except ModuleNotFoundError:
+    # Pygments is used only for HTML source code highlighting. Keep sv-report
+    # functional (CSV + HTML logs) even when pygments isn't installed by
+    # falling back to plain <pre> rendering.
+    HtmlFormatter = None  # type: ignore
+    lexers = None  # type: ignore
+    highlight = None  # type: ignore
 import multiprocessing
 from glob import glob
 from logparser import parseLog
@@ -462,8 +470,10 @@ def renderLogToHTMLFile(
 
 def renderInputFileToHTMLFile(
         out_dir: str, html_path: str, input_file_path: str, lex):
-    formatter = HtmlFormatter(
-        full=False, linenos=True, anchorlinenos=True, lineanchors='l')
+    formatter = None
+    if HtmlFormatter is not None and lex is not None:
+        formatter = HtmlFormatter(
+            full=False, linenos=True, anchorlinenos=True, lineanchors='l')
 
     os.makedirs(os.path.dirname(html_path), exist_ok=True)
 
@@ -480,7 +490,18 @@ def renderInputFileToHTMLFile(
             pass
         return
 
-    code = highlight(raw_code, lex, formatter)
+    if highlight is None or formatter is None or lex is None:
+        text = raw_code.decode("utf-8", errors="replace")
+        # Provide stable anchors compatible with convertPathsToRelativeLinks():
+        # it uses "#l-<line>".
+        lines = html.escape(text).splitlines()
+        rendered = ["<pre class=\"highlight\">"]
+        for idx, line in enumerate(lines, start=1):
+            rendered.append(f"<span id=\"l-{idx}\">{line}</span>")
+        rendered.append("</pre>")
+        code = "\n".join(rendered)
+    else:
+        code = highlight(raw_code, lex, formatter)
     csspath = os.path.join(_out_dir, "code.css")
     csspath = os.path.relpath(csspath, os.path.dirname(html_path))
     with open(html_path, 'w') as out:
@@ -753,7 +774,9 @@ def collect_logs(runner_name: str):
 
 
 def render_batch(input_files):
-    lex = lexers.get_lexer_by_name("systemverilog")
+    lex = None
+    if lexers is not None:
+        lex = lexers.get_lexer_by_name("systemverilog")
     batch_rendered_count = 0
     for input_file in input_files:
         input_file_html = os.path.join(_out_dir, input_file + ".html")
@@ -864,9 +887,16 @@ def main():
         meta_tags,
     ]
     results = None
-    with multiprocessing.Pool(initializer=init_globals,
-                              initargs=process_initargs) as pool:
-        results = pool.map(collect_logs, runner_names)
+    try:
+        with multiprocessing.Pool(initializer=init_globals,
+                                  initargs=process_initargs) as pool:
+            results = pool.map(collect_logs, runner_names)
+    except (PermissionError, OSError) as e:
+        _logger.warning(
+            f"Multiprocessing disabled ({type(e).__name__}: {e}); falling back to single-process report generation."
+        )
+        init_globals(*process_initargs)
+        results = [collect_logs(r) for r in runner_names]
 
     # Input files (.sv) path relative to repository's toplevel directory
     all_input_files: Set[str] = set()
@@ -924,9 +954,16 @@ def main():
 
     # Render input files
     rendered_count = 0
-    with multiprocessing.Pool(initializer=init_globals,
-                              initargs=process_initargs) as pool:
-        rendered_count = sum(pool.map(render_batch, file_batches))
+    try:
+        with multiprocessing.Pool(initializer=init_globals,
+                                  initargs=process_initargs) as pool:
+            rendered_count = sum(pool.map(render_batch, file_batches))
+    except (PermissionError, OSError) as e:
+        _logger.warning(
+            f"Multiprocessing disabled for file rendering ({type(e).__name__}: {e}); falling back to single-process rendering."
+        )
+        init_globals(*process_initargs)
+        rendered_count = sum(render_batch(b) for b in file_batches)
 
     _logger.info(
         f"(Re)generated {rendered_count}/{len(all_input_files)} rendered input files."

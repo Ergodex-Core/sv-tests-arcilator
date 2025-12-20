@@ -1,86 +1,55 @@
 #!/usr/bin/env bash
-# Re-run the same ~30 tests as restricted_30_run.sh, but generate a per-test
-# harness that drives inputs in a way that matches the intent of the original
-# UVM SV (rather than a generic counter pattern). For tests without ports we
-# avoid synthesizing dummy ports and instead rely on `--observe-*` taps.
-#
-# By default, this runs a fixed ~30-test subset. To scale to more tests:
-#  - Pass test paths as argv, or
-#  - Set TEST_LIST to a JSON (pass/fail/near) or a newline-delimited list.
+# Run ~100 SV tests through circt_verilog_arc, then generate and run a per-test
+# arcilator C++ harness which drives inputs with "reasonable" waveforms (clk/
+# reset/handshake-ish patterns) and emits a VCD. Artifacts are written under an
+# output tree that mirrors the test path so you can browse by subfolder.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_ROOT="${OUT_ROOT:-"$ROOT/out/artifacts/restricted_30_better"}"
-TMP_ROOT="${TMP_ROOT:-"$ROOT/out/tmp_restricted_30_better"}"
+OUT_ROOT="${OUT_ROOT:-"$ROOT/out/artifacts/restricted_100_better"}"
+TMP_ROOT="${TMP_ROOT:-"$ROOT/out/tmp_restricted_100_better"}"
 ARC_BIN="${ARC_BIN:-"$ROOT/circt-build/bin/arcilator"}"
 HEADER_GEN="${HEADER_GEN:-"$ROOT/third_party/tools/circt-verilog/tools/arcilator/arcilator-header-cpp.py"}"
 ARC_RUNTIME_INC="${ARC_RUNTIME_INC:-"$ROOT/third_party/tools/circt-verilog/tools/arcilator"}"
 CYCLES="${CYCLES:-64}"
 
+# Selection.
 CLEAN="${CLEAN:-1}"
-TEST_LIST="${TEST_LIST:-}"
-TEST_GROUP="${TEST_GROUP:-all}"          # all|pass|fail|near (when TEST_LIST is JSON)
-TEST_FILTER_RE="${TEST_FILTER_RE:-}"     # python regex applied to test paths
-
-DEFAULT_TESTS=(
-  "chapter-16/16.2--assert-final-uvm.sv"
-  "chapter-16/16.2--assert0-uvm.sv"
-  "chapter-16/16.2--assume-uvm.sv"
-  "chapter-16/16.7--sequence-uvm.sv"
-  "chapter-16/16.7--sequence-throughout-uvm.sv"
-  "chapter-16/16.9--sequence-stable-uvm.sv"
-  "chapter-16/16.10--sequence-local-var-uvm.sv"
-  "chapter-16/16.11--sequence-subroutine-uvm.sv"
-  "chapter-16/16.13--sequence-multiclock-uvm.sv"
-  "chapter-16/16.15--property-iff-uvm.sv"
-  "chapter-18/18.5--constraint-blocks_1.sv"
-  "chapter-18/18.5.5--uniqueness-constraints_1.sv"
-  "chapter-18/18.6.1--randomize-method_0.sv"
-  "chapter-18/18.6.3--behavior-of-randomization-methods_1.sv"
-  "chapter-18/18.7--in-line-constraints--randomize_0.sv"
-  "chapter-18/18.8--disabling-random-variables-with-rand_mode_2.sv"
-  "chapter-18/18.9--controlling-constraints-with-constraint_mode_0.sv"
-  "chapter-18/18.10--dynamic-constraint-modification_0.sv"
-  "chapter-18/18.11--in-line-random-variable-control_0.sv"
-  "chapter-18/18.14.3--object-stability_0.sv"
-  "generic/class/class_test_52.sv"
-  "generic/member/class_member_test_27.sv"
-  "testbenches/uvm_test_run_test.sv"
-  "testbenches/uvm_driver_sequencer_env.sv"
-  "testbenches/uvm_sequence.sv"
-  "uvm/uvm_files.sv"
-  "generated/uvm_classes_0/uvm_component_class_0.sv"
-  "generated/uvm_classes_0/uvm_env_class_0.sv"
-  "generated/uvm_classes_0/uvm_test_class_0.sv"
-  "generated/uvm_classes_0/uvm_driver_class_0.sv"
-)
+SKIP_EXISTING="${SKIP_EXISTING:-1}"
+TARGET_COUNT="${TARGET_COUNT:-100}"        # Only applies when loading from TEST_LIST.
+ALLOW_ENTRY_ONLY="${ALLOW_ENTRY_ONLY:-0}"  # 0: require module ports; 1: also run entry-only tops.
+TEST_LIST="${TEST_LIST:-"$ROOT/../tempnotes/uvm_arc_status.json"}"
+TEST_GROUP="${TEST_GROUP:-pass}"           # all|pass|fail|near when TEST_LIST is JSON
+TEST_FILTER_RE="${TEST_FILTER_RE:-}"       # Python regex applied to test paths
 
 usage() {
   cat <<EOF
 usage: $(basename "$0") [test-path ...]
 
-If no test paths are provided, defaults to the historical ~30-test subset.
+Runs tests, writes per-test artifacts under OUT_ROOT/<test-path>/.
+If you pass explicit test paths, runs exactly those (TARGET_COUNT is ignored).
+If you pass none, loads tests from TEST_LIST and runs up to TARGET_COUNT.
 
 Env vars:
-  TEST_LIST=path.json|path.txt   Load tests from a JSON {pass,fail,near} or a newline list.
-  TEST_GROUP=all|pass|fail|near  Select which group to run from JSON (default: all).
-  TEST_FILTER_RE=REGEX           Python regex filter applied to test paths.
-  CLEAN=1|0                      Wipe OUT_ROOT/TMP_ROOT before running (default: 1).
+  TEST_LIST=path.json|path.txt   Default: $TEST_LIST
+  TEST_GROUP=all|pass|fail|near  Default: $TEST_GROUP
+  TEST_FILTER_RE=REGEX           Default: (none)
+  TARGET_COUNT=N                 Default: $TARGET_COUNT
+  ALLOW_ENTRY_ONLY=0|1           Default: $ALLOW_ENTRY_ONLY
+  CLEAN=1|0                      Default: $CLEAN
+  SKIP_EXISTING=1|0              Default: $SKIP_EXISTING
 
   OUT_ROOT=... TMP_ROOT=... ARC_BIN=... CYCLES=...
 
 Examples:
-  # Run the current Arc failures (per tempnotes/uvm_arc_status.json):
-  TEST_LIST=$ROOT/../tempnotes/uvm_arc_status.json TEST_GROUP=fail \\
-    OUT_ROOT=$ROOT/out/artifacts/arc_fails_better \\
-    $(basename "$0")
+  # Run 100 passing Arc tests, browse by chapter directory:
+  $(basename "$0")
 
-  # Run all Chapter-16 tests:
-  TEST_LIST=$ROOT/../tempnotes/uvm_arc_status.json TEST_FILTER_RE='^chapter-16/' \\
-    OUT_ROOT=$ROOT/out/artifacts/ch16_better \\
-    $(basename "$0")
+  # Run only Chapter-16:
+  TEST_FILTER_RE='^chapter-16/' $(basename "$0")
 
-To add bespoke stimulus for a new test, extend the "kind =" selection in gen_driver().
+  # Run a hand-picked list:
+  $(basename "$0") chapter-16/16.2--assert0-uvm.sv chapter-16/16.2--assume-uvm.sv
 EOF
 }
 
@@ -89,13 +58,12 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-TESTS=()
-if [[ $# -gt 0 ]]; then
-  TESTS=("$@")
-  echo "[info] using ${#TESTS[@]} tests from argv"
-elif [[ -n "$TEST_LIST" ]]; then
-  [[ -f "$TEST_LIST" ]] || { echo "Test list not found: $TEST_LIST" >&2; exit 1; }
-  readarray -t TESTS < <(python3 - "$TEST_LIST" "$TEST_GROUP" "$TEST_FILTER_RE" <<'PY'
+command -v clang >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
+[[ -x "$ARC_BIN" ]] || { echo "arcilator not found at $ARC_BIN"; exit 1; }
+
+load_tests() {
+  local list="$1" group="$2" filter_re="$3"
+  python3 - "$list" "$group" "$filter_re" <<'PY'
 import json, pathlib, re, sys
 
 path = pathlib.Path(sys.argv[1])
@@ -121,25 +89,7 @@ else:
     lines = [l.strip() for l in path.read_text().splitlines() if l.strip() and not l.strip().startswith("#")]
     emit(lines)
 PY
-  )
-  if [[ ${#TESTS[@]} -eq 0 ]]; then
-    echo "No tests discovered from TEST_LIST=$TEST_LIST (group=$TEST_GROUP, filter=$TEST_FILTER_RE)" >&2
-    exit 1
-  fi
-  echo "[info] loaded ${#TESTS[@]} tests from $TEST_LIST"
-else
-  TESTS=("${DEFAULT_TESTS[@]}")
-  echo "[info] using default ${#TESTS[@]} tests"
-fi
-
-command -v clang >/dev/null 2>&1 || { echo "clang not found"; exit 1; }
-[[ -x "$ARC_BIN" ]] || { echo "arcilator not found at $ARC_BIN"; exit 1; }
-
-if [[ "$CLEAN" != "0" ]]; then
-  echo "[clean] removing $OUT_ROOT and $TMP_ROOT"
-  rm -rf "$OUT_ROOT" "$TMP_ROOT"
-fi
-mkdir -p "$OUT_ROOT" "$TMP_ROOT"
+}
 
 categorize() {
   local mlir="$1"
@@ -156,13 +106,9 @@ PY
 }
 
 gen_driver() {
-  local json="$1"
-  local cpp_out="$2"
-  local cycles="$3"
-  local header_basename="$4"
-  local test_path="$5"
+  local json="$1" cpp_out="$2" cycles="$3" header_basename="$4" test_path="$5"
   python3 - "$json" "$cpp_out" "$cycles" "$header_basename" "$test_path" <<'PY'
-import json, pathlib, sys
+import json, pathlib, re, sys
 
 json_path, cpp_out, cycles, header_basename, test_path = sys.argv[1:]
 cycles = int(cycles)
@@ -216,9 +162,21 @@ def is_test(suffix: str) -> bool:
     return test_path.endswith(suffix)
 
 kind = "default"
+
+# Prefer module-name based selection (covers multiple tests sharing the same DUT),
+# then allow per-test overrides.
+if name == "inverter":
+    kind = "inverter_assert"
+elif name == "adder":
+    kind = "adder_assume"
+elif name == "mem_ctrl":
+    kind = "mem_ctrl"
+elif name == "clk_gen":
+    kind = "clk_gen_pipe_valid"
+
 if is_test("chapter-16/16.2--assert0-uvm.sv") or is_test("chapter-16/16.2--assert-final-uvm.sv"):
     kind = "inverter_assert"
-elif is_test("chapter-16/16.2--assume-uvm.sv"):
+elif is_test("chapter-16/16.2--assume-uvm.sv") or is_test("chapter-16/16.2--assert-uvm.sv"):
     kind = "adder_assume"
 elif is_test("chapter-16/16.7--sequence-uvm.sv"):
     kind = "mem_ctrl"
@@ -263,7 +221,6 @@ lines: list[str] = [
 ]
 
 if kind == "inverter_assert":
-    # DUT module is inverter(a[7:0]) -> b[7:0] with b = !a (logical-not).
     lines += [
         "  // Drive a to 8'h35 (matches the UVM body).",
         *set_bytes("a", "0x35u"),
@@ -336,10 +293,8 @@ elif kind == "iff_rst_stuck_high":
         "  }",
     ]
 elif kind == "dut_interface_echo":
-    # The arcilator state packs the interface ports; empirically this is 2 bytes:
-    # [7:0]=data, [15:8]=clk (LSB used).
     lines += [
-        "  // Drive input_if.clk and input_if.data=PATTERN (2); keep out_if.clk in sync.",
+        "  // Drive packed interface input (empirically: [7:0]=data, [15:8]=clk).",
         "  constexpr uint8_t kPattern = 2;",
         "  for (uint64_t t = 0; t < kSteps; ++t) {",
     ]
@@ -351,7 +306,6 @@ elif kind == "dut_interface_echo":
         ]
     else:
         lines += ["    // [skip] unexpected interface input packing; falling back to generic input driving."]
-        # generic drive all inputs deterministically
         for idx, port in enumerate(sorted(in_bits)):
             lines += set_bytes(port, f"(t + {idx}u)")
 
@@ -371,20 +325,48 @@ elif kind == "dut_interface_echo":
         "  }",
     ]
 else:
-    # Default: toggle any input named *clk*, keep valid/req high if present,
-    # and drive remaining inputs with a deterministic ramp.
+    # Generic patterns: toggle clocks, apply a short reset (if present), keep
+    # valid/req asserted after reset, and ramp remaining inputs.
+    reset_ports = []
+    for p in sorted(in_bits):
+        pl = p.lower()
+        if "reset" in pl or re.fullmatch(r"rst(_n)?|reset(_n)?|rstn|resetn", pl):
+            reset_ports.append(p)
+
+    clk_ports = [p for p in sorted(in_bits) if ("clk" in p.lower() or p.lower() == "clock")]
+
     lines += [
-        "  // Default driver: toggles clk-like inputs, holds valid/req high, ramps others.",
+        "  // Default driver: toggles clk-like inputs, applies a short reset,",
+        "  // holds valid/req high after reset, ramps others.",
+        "  constexpr uint64_t kResetSteps = 4;",
         "  for (uint64_t t = 0; t < kSteps; ++t) {",
     ]
-    for port in sorted(in_bits):
-        if port.startswith("clk") or "clk" == port:
-            lines += set_bytes(port, "(t & 1u)")
-        elif port in ("valid", "req"):
-            lines += set_bytes(port, "1u")
+
+    # Reset(s).
+    for p in reset_ports:
+        pl = p.lower()
+        active_low = pl.endswith("_n") or pl.endswith("rstn") or pl.endswith("resetn")
+        if active_low:
+            lines += set_bytes(p, "(t < kResetSteps) ? 0u : 1u")
         else:
-            # ramp at a full-cycle rate to avoid anti-phase with clk toggling
-            lines += set_bytes(port, "((t >> 1) & 0xFFFFFFFFu)")
+            lines += set_bytes(p, "(t < kResetSteps) ? 1u : 0u")
+
+    # Clocks: give distinct phases for multiple clocks.
+    for idx, p in enumerate(clk_ports):
+        lines += set_bytes(p, f"((t + {idx}u) & 1u)")
+
+    # Remaining inputs.
+    for idx, p in enumerate(sorted(in_bits)):
+        if p in reset_ports or p in clk_ports:
+            continue
+        pl = p.lower()
+        if pl in ("valid", "req"):
+            lines += set_bytes(p, "(t < kResetSteps) ? 0u : 1u")
+        elif pl in ("en", "enable", "start"):
+            lines += set_bytes(p, "(t == kResetSteps) ? 1u : 0u")
+        else:
+            lines += set_bytes(p, f"((t >> 1) + {idx}u)")
+
     lines += [
         "    write_step(dut, vcd_writer, 10);",
         "  }",
@@ -400,42 +382,73 @@ PY
 }
 
 run_harness() {
-  local mlir="$1" stem="$2" dest="$3" test_path="$4"
+  local mlir="$1" dest="$2" test_path="$3"
   local json="$dest/state.json"
   local ll="$dest/imported.ll"
-  local hpp="$dest/${stem}.hpp"
-  local cpp="$dest/${stem}.cpp"
-  local bin="$dest/${stem}.bin"
-  local vcd="$dest/${stem}.vcd"
+  local hpp="$dest/harness.hpp"
+  local cpp="$dest/harness.cpp"
+  local bin="$dest/harness.bin"
+  local vcd="$dest/harness.vcd"
   local log="$dest/arcilator.log"
 
   if ! "$ARC_BIN" --state-file "$json" --emit-llvm "$mlir" -o "$ll" \
       --observe-ports --observe-wires --observe-registers --observe-named-values \
       >"$log" 2>&1; then
     echo "  [harness] arcilator failed (see $log)"
-    return
+    return 1
   fi
   if ! python3 "$HEADER_GEN" "$json" >"$hpp"; then
     echo "  [harness] header generation failed"
-    return
+    return 1
   fi
   if ! gen_driver "$json" "$cpp" "$CYCLES" "$(basename "$hpp")" "$test_path"; then
     echo "  [harness] driver generation failed"
-    return
+    return 1
   fi
   if ! ${CXX:-clang++} -std=c++17 -mllvm -opaque-pointers "$ll" "$cpp" \
       -I"$ARC_RUNTIME_INC" -I"$dest" -o "$bin" >>"$log" 2>&1; then
     echo "  [harness] clang failed (see $log)"
-    return
+    return 1
   fi
   if ! "$bin" "$vcd" >>"$log" 2>&1; then
     echo "  [harness] sim run failed (see $log)"
-    return
+    return 1
   fi
   echo "  [harness] VCD: $vcd"
+  return 0
 }
 
+if [[ "$CLEAN" != "0" ]]; then
+  echo "[clean] removing $OUT_ROOT and $TMP_ROOT"
+  rm -rf "$OUT_ROOT" "$TMP_ROOT"
+fi
+mkdir -p "$OUT_ROOT" "$TMP_ROOT"
+
+summary="$OUT_ROOT/_summary.tsv"
+printf "test\tcategory\tharness\tvcd\n" >"$summary"
+
+TESTS=()
+enforce_target=1
+if [[ $# -gt 0 ]]; then
+  TESTS=("$@")
+  enforce_target=0
+  echo "[info] using ${#TESTS[@]} tests from argv"
+else
+  [[ -f "$TEST_LIST" ]] || { echo "Test list not found: $TEST_LIST" >&2; exit 1; }
+  readarray -t TESTS < <(load_tests "$TEST_LIST" "$TEST_GROUP" "$TEST_FILTER_RE")
+  if [[ ${#TESTS[@]} -eq 0 ]]; then
+    echo "No tests discovered from TEST_LIST=$TEST_LIST (group=$TEST_GROUP, filter=$TEST_FILTER_RE)" >&2
+    exit 1
+  fi
+  echo "[info] loaded ${#TESTS[@]} tests from $TEST_LIST"
+fi
+
+ran=0
 for test in "${TESTS[@]}"; do
+  if [[ "$enforce_target" == "1" && "$ran" -ge "$TARGET_COUNT" ]]; then
+    break
+  fi
+
   src=""
   test_label="$test"
   if [[ -f "$ROOT/tests/$test" ]]; then
@@ -462,8 +475,13 @@ PY
     continue
   fi
 
-  stem="${test_label//\//__}"
-  dest="$OUT_ROOT/$stem"
+  dest="$OUT_ROOT/$test_label"
+  if [[ "$SKIP_EXISTING" != "0" && -f "$dest/harness.vcd" ]]; then
+    printf "%s\t%s\t%s\t%s\n" "$test_label" "existing" "ok" "$dest/harness.vcd" >>"$summary"
+    ((ran+=1))
+    continue
+  fi
+
   mkdir -p "$dest"
   cp "$src" "$dest/original.sv"
 
@@ -481,18 +499,42 @@ PY
 
   if [[ ! -f "$dest/imported.mlir" ]]; then
     echo "  [warn] missing imported.mlir"
+    printf "%s\t%s\t%s\t%s\n" "$test_label" "missing_mlir" "skip" "" >>"$summary"
     continue
   fi
 
   category=$(categorize "$dest/imported.mlir")
-  echo "  [info] category=$category" | tee "$dest/category.txt"
+  echo "category=$category" >"$dest/category.txt"
 
   case "$category" in
-    ports_and_entry|entry_only)
-      run_harness "$dest/imported.mlir" "$stem" "$dest" "$test_label"
+    ports_and_entry)
+      ;;
+    entry_only)
+      if [[ "$ALLOW_ENTRY_ONLY" == "0" ]]; then
+        echo "  [info] entry-only top; skipping (set ALLOW_ENTRY_ONLY=1 to run)"
+        printf "%s\t%s\t%s\t%s\n" "$test_label" "$category" "skip" "" >>"$summary"
+        continue
+      fi
       ;;
     class_only)
-      echo "  [info] class/package only; harness skipped"
+      echo "  [info] class/package only; skipping"
+      printf "%s\t%s\t%s\t%s\n" "$test_label" "$category" "skip" "" >>"$summary"
+      continue
+      ;;
+    *)
+      echo "  [warn] unknown category=$category; skipping"
+      printf "%s\t%s\t%s\t%s\n" "$test_label" "$category" "skip" "" >>"$summary"
+      continue
       ;;
   esac
+
+  if run_harness "$dest/imported.mlir" "$dest" "$test_label"; then
+    printf "%s\t%s\t%s\t%s\n" "$test_label" "$category" "ok" "$dest/harness.vcd" >>"$summary"
+  else
+    printf "%s\t%s\t%s\t%s\n" "$test_label" "$category" "fail" "" >>"$summary"
+  fi
+
+  ((ran+=1))
 done
+
+echo "[done] ran=$ran summary=$summary"
