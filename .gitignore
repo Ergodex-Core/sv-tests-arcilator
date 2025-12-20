@@ -1,5 +1,10 @@
 out
+out_*
 build
+circt-build
+circt-build-*
 tests/generated
 __pycache__
 venv
+*.out
+tmp_*
