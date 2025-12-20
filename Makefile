@@ -161,7 +161,11 @@ urls:
 versions:
 
 report: init tests versions urls
-	./tools/sv-report --revision $(shell git rev-parse --short HEAD)
+	mkdir -p $(OUT_DIR)/report
+	./tools/sv-report --revision $(shell git rev-parse --short HEAD) \
+		--logs $(OUT_DIR)/logs \
+		--out $(OUT_DIR)/report/index.html \
+		--csv $(OUT_DIR)/report/report.csv
 	cp $(CONF_DIR)/report/*.css $(OUT_DIR)/report/
 	cp $(CONF_DIR)/report/*.js $(OUT_DIR)/report/
 	cp $(CONF_DIR)/report/*.png $(OUT_DIR)/report/

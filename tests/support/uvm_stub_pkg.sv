@@ -1,6 +1,12 @@
 // Minimal UVM stub package used for circt-verilog smoke testing.
 // Provides just enough definitions and macros for the lightweight
 // self-checking tests in this tree to elaborate.
+/*
+:name: uvm_stub_pkg
+:description: Support file (not a standalone test); skipped by all runners.
+:tags: support uvm-req
+:compatible-runners: none
+*/
 
 package uvm_pkg;
 
