@@ -38,6 +38,7 @@ import enum
 from typing import Dict, Any, List, Set, Iterable
 import json
 import itertools
+from concurrent.futures import ThreadPoolExecutor
 
 # We only consider tests with minimum this size for the throughput
 # calculation, so that we skip the super-tiny few-line tests that are
@@ -590,6 +591,12 @@ def collect_logs(runner_name: str):
                     value = attr.group(2).strip()
 
                     if param not in remaining_parameters:
+                        # Runner-specific metadata parameters (e.g.
+                        # runner_<tool>_flags, runner_arcilator_*) can appear in
+                        # logs; ignore them for reporting purposes.
+                        if re.match(r"runner_.*_flags$", param) or re.match(
+                                r"runner_arcilator_[a-z0-9_]+$", param):
+                            continue
                         _logger.warning(
                             "Skipping unknown parameter: {} in {}".format(
                                 param, log_file))
@@ -875,6 +882,17 @@ def main():
     _logger.info(
         "Generating {} from log files in '{}'".format(args.out, args.logs))
 
+    # Some environments disallow POSIX semaphores (Python multiprocessing uses
+    # them for queues/locks). Detect this early and fall back to threads.
+    try:
+        multiprocessing.Lock()
+        mp_ok = True
+    except (PermissionError, OSError):
+        mp_ok = False
+        _logger.info(
+            "Multiprocessing unavailable (POSIX semaphores denied); using threads."
+        )
+
     process_initargs = [
         args.log_template,
         args.code_template,
@@ -887,16 +905,22 @@ def main():
         meta_tags,
     ]
     results = None
-    try:
-        with multiprocessing.Pool(initializer=init_globals,
-                                  initargs=process_initargs) as pool:
-            results = pool.map(collect_logs, runner_names)
-    except (PermissionError, OSError) as e:
-        _logger.warning(
-            f"Multiprocessing disabled ({type(e).__name__}: {e}); falling back to single-process report generation."
-        )
+    if mp_ok:
+        try:
+            with multiprocessing.Pool(initializer=init_globals,
+                                      initargs=process_initargs) as pool:
+                results = pool.map(collect_logs, runner_names)
+        except (PermissionError, OSError) as e:
+            mp_ok = False
+            _logger.warning(
+                f"Multiprocessing disabled ({type(e).__name__}: {e}); falling back to threads."
+            )
+
+    if results is None:
         init_globals(*process_initargs)
-        results = [collect_logs(r) for r in runner_names]
+        max_workers = min(len(runner_names) or 1, os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = list(ex.map(collect_logs, runner_names))
 
     # Input files (.sv) path relative to repository's toplevel directory
     all_input_files: Set[str] = set()
@@ -954,16 +978,22 @@ def main():
 
     # Render input files
     rendered_count = 0
-    try:
-        with multiprocessing.Pool(initializer=init_globals,
-                                  initargs=process_initargs) as pool:
-            rendered_count = sum(pool.map(render_batch, file_batches))
-    except (PermissionError, OSError) as e:
-        _logger.warning(
-            f"Multiprocessing disabled for file rendering ({type(e).__name__}: {e}); falling back to single-process rendering."
-        )
+    if mp_ok:
+        try:
+            with multiprocessing.Pool(initializer=init_globals,
+                                      initargs=process_initargs) as pool:
+                rendered_count = sum(pool.map(render_batch, file_batches))
+        except (PermissionError, OSError) as e:
+            mp_ok = False
+            _logger.warning(
+                f"Multiprocessing disabled for file rendering ({type(e).__name__}: {e}); falling back to threads."
+            )
+
+    if not mp_ok:
         init_globals(*process_initargs)
-        rendered_count = sum(render_batch(b) for b in file_batches)
+        max_workers = min(len(file_batches) or 1, os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            rendered_count = sum(ex.map(render_batch, file_batches))
 
     _logger.info(
         f"(Re)generated {rendered_count}/{len(all_input_files)} rendered input files."
