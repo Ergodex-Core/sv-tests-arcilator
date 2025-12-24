@@ -139,6 +139,16 @@ class arcilator(BaseRunner):
                 shutil.which("arcilator") or os.path.join(self._bin_dir, "arcilator"),
             )
         )
+        firtool_env = os.environ.get("FIRTOOL_BIN") or os.environ.get("FIRTOOL")
+        self._firtool = _abspath_or_empty(
+            firtool_env
+            or shutil.which("firtool")
+            or os.path.join(self._bin_dir, "firtool")
+        )
+        llc_env = os.environ.get("LLC_BIN") or os.environ.get("LLC")
+        self._llc = _abspath_or_empty(
+            llc_env or shutil.which("llc") or os.path.join(self._bin_dir, "llc")
+        )
 
         third_party_arcilator_dir = os.path.join(
             svtests_root, "third_party", "tools", "circt-verilog", "tools", "arcilator"
@@ -222,6 +232,19 @@ class arcilator(BaseRunner):
         mode = params["mode"]
         tests_root = _abspath_or_empty(os.environ.get("TESTS_DIR", ""))
 
+        firrtl_input = (params.get("runner_arcilator_firrtl") or "").strip()
+        firrtl_mode = bool(firrtl_input)
+        firtool_flags = _split_shlex_list(os.environ.get("ARCILATOR_FIRTOOL_FLAGS", ""))
+        firtool_flags += _split_shlex_list(
+            params.get("runner_arcilator_firtool_flags", "")
+        )
+        firrtl_src = ""
+        fir_preprocessed = ""
+        if firrtl_mode:
+            base_dir = tests_root or os.getcwd()
+            firrtl_src = _resolve_path(firrtl_input, base_dir)
+            fir_preprocessed = os.path.join(tmp_dir, "input.fir")
+
         linked_driver = (params.get("runner_arcilator_driver") or "").strip()
         linked_mode = bool(linked_driver)
         header_basename = "model.hpp"
@@ -240,6 +263,20 @@ class arcilator(BaseRunner):
         driver_cpp = os.path.join(tmp_dir, "driver.cpp")
         driver_bin = os.path.join(tmp_dir, "driver.bin")
         vcd_path = os.path.join(tmp_dir, "wave.vcd")
+
+        fir_prep_cmd = ""
+        firtool_cmd = ""
+        if firrtl_mode:
+            fir_src = shlex.quote(firrtl_src)
+            fir_dst = shlex.quote(fir_preprocessed)
+            if firrtl_src.endswith(".gz"):
+                fir_prep_cmd = f"gzip -dc {fir_src} | sed 's/printf.*/skip/' > {fir_dst}"
+            else:
+                fir_prep_cmd = f"sed 's/printf.*/skip/' {fir_src} > {fir_dst}"
+            firtool_cmd = self._format_cmd(
+                [self._firtool, "--format=fir", fir_preprocessed, "--ir-hw", "-o", ir_path]
+                + firtool_flags
+            )
 
         circt_cmd = [self._circt_verilog]
         if mode == "preprocessing":
@@ -449,6 +486,7 @@ class arcilator(BaseRunner):
 
         cache_key = ""
         cache_dir = ""
+        cache_fir = ""
         cache_ir = ""
         cache_arc_mlir = ""
         cache_state = ""
@@ -459,6 +497,7 @@ class arcilator(BaseRunner):
         if cache_enabled and cache_root:
             runtime_hdr = os.path.join(self._runtime_inc, "arcilator-runtime.h")
             payload = {
+                "import_kind": "firrtl" if firrtl_mode else "sv",
                 "top": top or "",
                 "defines": list(params.get("defines", [])),
                 "incdirs": list(params.get("incdirs", [])),
@@ -470,11 +509,23 @@ class arcilator(BaseRunner):
                 "arcilator": _file_fingerprint(self._arcilator),
                 "header_gen": _file_fingerprint(self._header_gen),
                 "runtime_hdr": _file_fingerprint(runtime_hdr) if os.path.isfile(runtime_hdr) else runtime_hdr,
+                "llc": _file_fingerprint(self._llc) if _is_executable(self._llc) else self._llc,
             }
+            if firrtl_mode:
+                payload.update(
+                    {
+                        "firrtl": _file_fingerprint(firrtl_src) if firrtl_src else "",
+                        "firtool": _file_fingerprint(self._firtool)
+                        if _is_executable(self._firtool)
+                        else self._firtool,
+                        "firtool_flags": list(firtool_flags),
+                    }
+                )
             cache_key = hashlib.sha256(
                 json.dumps(payload, sort_keys=True).encode("utf-8")
             ).hexdigest()[:16]
             cache_dir = os.path.join(cache_root, cache_key)
+            cache_fir = os.path.join(cache_dir, "input.fir")
             cache_ir = os.path.join(cache_dir, "imported.mlir")
             cache_arc_mlir = os.path.join(cache_dir, "imported.arc.mlir")
             cache_state = os.path.join(cache_dir, "state.json")
@@ -485,22 +536,41 @@ class arcilator(BaseRunner):
 
         is_linux = sys.platform.startswith("linux")
         linux_atomic = ["-latomic"] if is_linux else []
+        linux_no_pie = ["-no-pie"] if is_linux else []
         cxx = os.environ.get("CXX", "clang++")
+        use_llc = _is_executable(self._llc)
+        model_obj_stage = "llc (model.o)" if use_llc else "clang++ (model.o)"
 
         # Cache build commands (when enabled).
         circt_cmd_cache = []
+        fir_prep_cmd_cache = ""
+        firtool_cmd_cache = ""
         arc_mlir_cmd_cache = ""
         arc_emit_cmd_cache = ""
         header_gen_cmd_cache = ""
         model_obj_cmd_cache = ""
         if cache_enabled and cache_dir:
-            circt_cmd_cache = list(circt_cmd)
-            if "-o" in circt_cmd_cache:
-                out_idx = circt_cmd_cache.index("-o")
-                if out_idx + 1 < len(circt_cmd_cache):
-                    circt_cmd_cache[out_idx + 1] = cache_ir
+            if firrtl_mode:
+                fir_src = shlex.quote(firrtl_src)
+                fir_dst = shlex.quote(cache_fir)
+                if firrtl_src.endswith(".gz"):
+                    fir_prep_cmd_cache = (
+                        f"gzip -dc {fir_src} | sed 's/printf.*/skip/' > {fir_dst}"
+                    )
+                else:
+                    fir_prep_cmd_cache = f"sed 's/printf.*/skip/' {fir_src} > {fir_dst}"
+                firtool_cmd_cache = self._format_cmd(
+                    [self._firtool, "--format=fir", cache_fir, "--ir-hw", "-o", cache_ir]
+                    + firtool_flags
+                )
             else:
-                circt_cmd_cache += ["-o", cache_ir]
+                circt_cmd_cache = list(circt_cmd)
+                if "-o" in circt_cmd_cache:
+                    out_idx = circt_cmd_cache.index("-o")
+                    if out_idx + 1 < len(circt_cmd_cache):
+                        circt_cmd_cache[out_idx + 1] = cache_ir
+                else:
+                    circt_cmd_cache += ["-o", cache_ir]
 
             arc_mlir_cmd_cache = self._format_cmd(
                 [self._arcilator, "--emit-mlir", cache_ir] + arc_flags
@@ -527,11 +597,16 @@ class arcilator(BaseRunner):
                 ["python3", self._header_gen] + header_gen_flags + [cache_state]
             ) + f" > {shlex.quote(cache_header)}"
 
-            model_obj_cmd_cache = self._format_cmd(
-                [cxx, "-c", "-mllvm", "-opaque-pointers"]
-                + model_cxxflags
-                + [cache_llvm, "-o", cache_obj]
-            )
+            if use_llc:
+                model_obj_cmd_cache = self._format_cmd(
+                    [self._llc, "-O3", "--filetype=obj", cache_llvm, "-o", cache_obj]
+                )
+            else:
+                model_obj_cmd_cache = self._format_cmd(
+                    [cxx, "-c", "-mllvm", "-opaque-pointers"]
+                    + model_cxxflags
+                    + [cache_llvm, "-o", cache_obj]
+                )
 
         script_path = os.path.join(tmp_dir, "run_arcilator_flow.sh")
         with open(script_path, "w", encoding="utf-8") as script:
@@ -571,6 +646,13 @@ class arcilator(BaseRunner):
             script.write(f'export ARCILATOR_MODEL_OBJ={shlex.quote(model_obj_path)}\n')
             script.write(f'export ARCILATOR_TEST_REL={shlex.quote(test_rel)}\n')
             script.write(f'export ARCILATOR_DUT_CACHE_DIR={shlex.quote(cache_dir)}\n')
+            if firrtl_mode:
+                script.write(
+                    f'[[ -f {shlex.quote(firrtl_src)} ]] || {{ echo "[error] FIRRTL not found: {shlex.quote(firrtl_src)}"; exit 2; }}\n'
+                )
+                script.write(
+                    f'[[ -x {shlex.quote(self._firtool)} ]] || {{ echo "[error] firtool not executable: {shlex.quote(self._firtool)}"; exit 2; }}\n'
+                )
 
             # Linked-driver mode: run an arc-tests style flow (cached model build
             # + user-provided C++ driver) and exit before the default autotb.
@@ -578,9 +660,18 @@ class arcilator(BaseRunner):
                 script.write('echo "[mode] linked-driver"\n')
 
                 if mode in ("preprocessing", "parsing"):
-                    script.write('echo "[stage] slang+import (circt-verilog)"\n')
-                    script.write(self._format_cmd(circt_cmd) + "\n")
-                    script.write("exit $?\n")
+                    if firrtl_mode:
+                        script.write('echo "[stage] firtool (FIRRTL -> HW)"\n')
+                        script.write(fir_prep_cmd + "\n")
+                        script.write("fir_prep_rc=$?\n")
+                        script.write('echo "[stage] firrtl prep rc=${fir_prep_rc}"\n')
+                        script.write("if [[ ${fir_prep_rc} -ne 0 ]]; then exit ${fir_prep_rc}; fi\n")
+                        script.write(firtool_cmd + "\n")
+                        script.write("exit $?\n")
+                    else:
+                        script.write('echo "[stage] slang+import (circt-verilog)"\n')
+                        script.write(self._format_cmd(circt_cmd) + "\n")
+                        script.write("exit $?\n")
 
                 if cache_enabled and cache_dir:
                     script.write(f'CACHE_KEY={shlex.quote(cache_key)}\n')
@@ -620,12 +711,24 @@ class arcilator(BaseRunner):
                     script.write("  fi\n")
                     script.write("  echo \"[cache] miss ${CACHE_KEY}\"\n")
                     script.write("  rm -f \"${CACHE_OK}\" \"${CACHE_IR}\" \"${CACHE_ARC_MLIR}\" \"${CACHE_STATE}\" \"${CACHE_LLVM}\" \"${CACHE_HEADER}\" \"${CACHE_OBJ}\"\n")
-
-                    script.write('  echo "[stage] slang+import (circt-verilog -> moore) [cache]"\n')
-                    script.write("  " + self._format_cmd(circt_cmd_cache) + "\n")
-                    script.write("  circt_rc=$?\n")
-                    script.write('  echo "[stage] circt-verilog rc=${circt_rc}"\n')
-                    script.write("  if [[ ${circt_rc} -ne 0 ]]; then unlock_cache; exit ${circt_rc}; fi\n")
+                    if firrtl_mode:
+                        script.write(f"  rm -f {shlex.quote(cache_fir)}\n")
+                        script.write('  echo "[stage] firrtl prep (decompress+sed) [cache]"\n')
+                        script.write("  " + fir_prep_cmd_cache + "\n")
+                        script.write("  fir_prep_rc=$?\n")
+                        script.write('  echo "[stage] firrtl prep rc=${fir_prep_rc}"\n')
+                        script.write("  if [[ ${fir_prep_rc} -ne 0 ]]; then unlock_cache; exit ${fir_prep_rc}; fi\n")
+                        script.write('  echo "[stage] firtool (FIRRTL -> HW) [cache]"\n')
+                        script.write("  " + firtool_cmd_cache + "\n")
+                        script.write("  firtool_rc=$?\n")
+                        script.write('  echo "[stage] firtool rc=${firtool_rc}"\n')
+                        script.write("  if [[ ${firtool_rc} -ne 0 ]]; then unlock_cache; exit ${firtool_rc}; fi\n")
+                    else:
+                        script.write('  echo "[stage] slang+import (circt-verilog -> moore) [cache]"\n')
+                        script.write("  " + self._format_cmd(circt_cmd_cache) + "\n")
+                        script.write("  circt_rc=$?\n")
+                        script.write('  echo "[stage] circt-verilog rc=${circt_rc}"\n')
+                        script.write("  if [[ ${circt_rc} -ne 0 ]]; then unlock_cache; exit ${circt_rc}; fi\n")
 
                     script.write('  echo "[stage] arc pipeline (emit-mlir) [cache]"\n')
                     script.write("  " + arc_mlir_cmd_cache + "\n")
@@ -645,10 +748,10 @@ class arcilator(BaseRunner):
                     script.write('  echo "[stage] header-gen rc=${hdr_rc}"\n')
                     script.write("  if [[ ${hdr_rc} -ne 0 ]]; then unlock_cache; exit ${hdr_rc}; fi\n")
 
-                    script.write('  echo "[stage] clang++ (model.o) [cache]"\n')
+                    script.write(f'  echo "[stage] {model_obj_stage} [cache]"\n')
                     script.write("  " + model_obj_cmd_cache + "\n")
                     script.write("  obj_rc=$?\n")
-                    script.write('  echo "[stage] clang++ (model.o) rc=${obj_rc}"\n')
+                    script.write('  echo "[stage] model.o rc=${obj_rc}"\n')
                     script.write("  if [[ ${obj_rc} -ne 0 ]]; then unlock_cache; exit ${obj_rc}; fi\n")
 
                     script.write("  echo \"${CACHE_KEY}\" > \"${CACHE_OK}\"\n")
@@ -673,7 +776,7 @@ class arcilator(BaseRunner):
 
                     script.write('echo "[stage] clang++ (custom driver)"\n')
                     compile_cmd = (
-                        [cxx, "-std=c++17", "-mllvm", "-opaque-pointers"]
+                        [cxx, "-std=c++17"]
                         + driver_cxxflags
                         + [model_obj_path]
                         + driver_sources
@@ -681,6 +784,7 @@ class arcilator(BaseRunner):
                         + [f"-I{d}" for d in driver_incdirs]
                         + ["-o", driver_bin]
                         + driver_ldflags
+                        + linux_no_pie
                         + linux_atomic
                     )
                     script.write(self._format_cmd(compile_cmd) + "\n")
@@ -696,11 +800,23 @@ class arcilator(BaseRunner):
                         script.write("exit 0\n")
                 else:
                     # No cache: fall back to a single-shot build in the tmp dir.
-                    script.write('echo "[stage] slang+import (circt-verilog -> moore)"\n')
-                    script.write(self._format_cmd(circt_cmd) + "\n")
-                    script.write("circt_rc=$?\n")
-                    script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
-                    script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
+                    if firrtl_mode:
+                        script.write('echo "[stage] firrtl prep (decompress+sed)"\n')
+                        script.write(fir_prep_cmd + "\n")
+                        script.write("fir_prep_rc=$?\n")
+                        script.write('echo "[stage] firrtl prep rc=${fir_prep_rc}"\n')
+                        script.write("if [[ ${fir_prep_rc} -ne 0 ]]; then exit ${fir_prep_rc}; fi\n")
+                        script.write('echo "[stage] firtool (FIRRTL -> HW)"\n')
+                        script.write(firtool_cmd + "\n")
+                        script.write("firtool_rc=$?\n")
+                        script.write('echo "[stage] firtool rc=${firtool_rc}"\n')
+                        script.write("if [[ ${firtool_rc} -ne 0 ]]; then exit ${firtool_rc}; fi\n")
+                    else:
+                        script.write('echo "[stage] slang+import (circt-verilog -> moore)"\n')
+                        script.write(self._format_cmd(circt_cmd) + "\n")
+                        script.write("circt_rc=$?\n")
+                        script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
+                        script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
 
                     script.write('echo "[stage] arc pipeline (emit-mlir)"\n')
                     script.write(arc_mlir_cmd + "\n")
@@ -724,16 +840,45 @@ class arcilator(BaseRunner):
                     script.write('echo "[stage] header-gen rc=${hdr_rc}"\n')
                     script.write("if [[ ${hdr_rc} -ne 0 ]]; then exit ${hdr_rc}; fi\n")
 
+                    script.write(f'echo "[stage] {model_obj_stage}"\n')
+                    if use_llc:
+                        script.write(
+                            self._format_cmd(
+                                [
+                                    self._llc,
+                                    "-O3",
+                                    "--filetype=obj",
+                                    llvm_path,
+                                    "-o",
+                                    model_obj_path,
+                                ]
+                            )
+                            + "\n"
+                        )
+                    else:
+                        script.write(
+                            self._format_cmd(
+                                [cxx, "-c", "-mllvm", "-opaque-pointers"]
+                                + model_cxxflags
+                                + [llvm_path, "-o", model_obj_path]
+                            )
+                            + "\n"
+                        )
+                    script.write("obj_rc=$?\n")
+                    script.write('echo "[stage] model.o rc=${obj_rc}"\n')
+                    script.write("if [[ ${obj_rc} -ne 0 ]]; then exit ${obj_rc}; fi\n")
+
                     script.write('echo "[stage] clang++ (custom driver)"\n')
                     compile_cmd = (
-                        [cxx, "-std=c++17", "-mllvm", "-opaque-pointers"]
+                        [cxx, "-std=c++17"]
                         + driver_cxxflags
-                        + [llvm_path]
+                        + [model_obj_path]
                         + driver_sources
                         + [f"-I{self._runtime_inc}", f"-I{tmp_dir}"]
                         + [f"-I{d}" for d in driver_incdirs]
                         + ["-o", driver_bin]
                         + driver_ldflags
+                        + linux_no_pie
                         + linux_atomic
                     )
                     script.write(self._format_cmd(compile_cmd) + "\n")
@@ -748,11 +893,23 @@ class arcilator(BaseRunner):
                     else:
                         script.write("exit 0\n")
 
-            script.write('echo "[stage] slang+import (circt-verilog -> moore)"\n')
-            script.write(self._format_cmd(circt_cmd) + "\n")
-            script.write("circt_rc=$?\n")
-            script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
-            script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
+            if firrtl_mode:
+                script.write('echo "[stage] firrtl prep (decompress+sed)"\n')
+                script.write(fir_prep_cmd + "\n")
+                script.write("fir_prep_rc=$?\n")
+                script.write('echo "[stage] firrtl prep rc=${fir_prep_rc}"\n')
+                script.write("if [[ ${fir_prep_rc} -ne 0 ]]; then exit ${fir_prep_rc}; fi\n")
+                script.write('echo "[stage] firtool (FIRRTL -> HW)"\n')
+                script.write(firtool_cmd + "\n")
+                script.write("firtool_rc=$?\n")
+                script.write('echo "[stage] firtool rc=${firtool_rc}"\n')
+                script.write("if [[ ${firtool_rc} -ne 0 ]]; then exit ${firtool_rc}; fi\n")
+            else:
+                script.write('echo "[stage] slang+import (circt-verilog -> moore)"\n')
+                script.write(self._format_cmd(circt_cmd) + "\n")
+                script.write("circt_rc=$?\n")
+                script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
+                script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
 
             if mode in ("preprocessing", "parsing"):
                 script.write("exit 0\n")
@@ -1048,13 +1205,47 @@ pathlib.Path(cpp_out).write_text("\n".join(lines) + "\n")
                         "if [[ ${drv_rc} -ne 0 ]]; then exit ${drv_rc}; fi\n"
                     )
 
+                    script.write(f'echo "[stage] {model_obj_stage}"\n')
+                    if use_llc:
+                        script.write(
+                            self._format_cmd(
+                                [
+                                    self._llc,
+                                    "-O3",
+                                    "--filetype=obj",
+                                    llvm_path,
+                                    "-o",
+                                    model_obj_path,
+                                ]
+                            )
+                            + "\n"
+                        )
+                    else:
+                        script.write(
+                            self._format_cmd(
+                                [cxx, "-c", "-mllvm", "-opaque-pointers"]
+                                + model_cxxflags
+                                + [llvm_path, "-o", model_obj_path]
+                            )
+                            + "\n"
+                        )
+                    script.write("obj_rc=$?\n")
+                    script.write('echo "[stage] model.o rc=${obj_rc}"\n')
+                    script.write("if [[ ${obj_rc} -ne 0 ]]; then exit ${obj_rc}; fi\n")
+
                     # Build the simulation driver. Keep flags minimal; users can override CXX.
                     script.write('echo "[stage] clang++ (driver)"\n')
-                    cxx = shlex.quote(os.environ.get("CXX", "clang++"))
-                    script.write(
-                        f'{cxx} -std=c++17 -mllvm -opaque-pointers {shlex.quote(llvm_path)} {shlex.quote(driver_cpp)} '
-                        f'-I{shlex.quote(self._runtime_inc)} -I{shlex.quote(tmp_dir)} -o {shlex.quote(driver_bin)}\n'
-                    )
+                    compile_cmd = [
+                        cxx,
+                        "-std=c++17",
+                        model_obj_path,
+                        driver_cpp,
+                        f"-I{self._runtime_inc}",
+                        f"-I{tmp_dir}",
+                        "-o",
+                        driver_bin,
+                    ] + linux_no_pie + linux_atomic
+                    script.write(self._format_cmd(compile_cmd) + "\n")
                     script.write("cxx_rc=$?\n")
                     script.write('echo "[stage] clang++ rc=${cxx_rc}"\n')
                     script.write(
