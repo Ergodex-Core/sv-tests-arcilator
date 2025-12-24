@@ -8,10 +8,9 @@
 
 
 /*
-:name: property_disable_iff_fail_test_uvm
-:description: failing property with disable iff test with UVM
-:should_fail_because: disable iff uses wrong reset polarity
-:type: simulation
+:name: property_disable_iff_test_uvm_duplicate
+:description: property with disable iff test with UVM (duplicate of 16.15--property-iff-uvm.sv)
+:type: simulation elaboration parsing
 :tags: uvm uvm-assertions
 :timeout: 300
 :unsynthesizable: 1

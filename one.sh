@@ -15,7 +15,8 @@ usage: ./one.sh [make-target] [MAKEVAR=...] [-jN]
 Defaults to: `report` (runs all tests + generates `OUT_DIR/report/report.csv`).
 
 Examples:
-  # Full pessimistic arcilator run (prefers `module top` for UVM tests):
+  # Full pessimistic arcilator run (prefers `module top` for UVM assertion tests):
+  # Add `ARCILATOR_UVM_TOP_STRICT=1` to force `module top` even for class-heavy benches.
   ARCILATOR_UVM_TOP_MODE=top ./one.sh report OUT_DIR=out_arcilator_pess -j"$(nproc)"
 
   # Restricted run:
