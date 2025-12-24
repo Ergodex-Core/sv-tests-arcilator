@@ -7,10 +7,7 @@
 :top_module: snitch_th
 :compatible-runners: arcilator
 :unsynthesizable: 1
-:
-:files:
-:  ../../arc-tests/snitch/design/snitch_th.sv
-:  ../../arc-tests/snitch/design/snitch.sv
+:files: ../../arc-tests/snitch/design/snitch_th.sv ../../arc-tests/snitch/design/snitch.sv
 :incdirs: ../../arc-tests/snitch/design
 :
 :runner_arcilator_driver: ../../arc-tests/snitch/snitch-main.cpp
