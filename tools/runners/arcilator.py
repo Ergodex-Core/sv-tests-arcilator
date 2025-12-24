@@ -263,7 +263,17 @@ class arcilator(BaseRunner):
 
         # Request Moore IR so arcilator can consume the elaborated design.
         if mode in ("elaboration", "simulation", "simulation_without_run"):
-            circt_cmd.append("--ir-moore")
+            circt_ir = (params.get("runner_arcilator_circt_ir") or "").strip().lower()
+            if not circt_ir:
+                circt_ir = (os.environ.get("ARCILATOR_CIRCT_IR") or "moore").strip().lower()
+            circt_ir_flag = {
+                "moore": "--ir-moore",
+                "hw": "--ir-hw",
+                "llhd": "--ir-llhd",
+                "core": "--ir-hw",
+            }.get(circt_ir, "")
+            if circt_ir_flag:
+                circt_cmd.append(circt_ir_flag)
 
         circt_cmd += [
             "-Wno-implicit-conv",

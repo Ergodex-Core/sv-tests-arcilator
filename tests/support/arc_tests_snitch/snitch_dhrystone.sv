@@ -17,6 +17,7 @@
 :runner_arcilator_driver_args: --trace {VCD} ../../arc-tests/benchmarks/dhrystone_rv32i.riscv
 :runner_arcilator_header_basename: snitch-arc.h
 :runner_arcilator_header_gen_flags: --view-depth 1
+:runner_arcilator_circt_ir: hw
 :
 :runner_arcilator_dut_cache: 1
 */
