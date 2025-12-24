@@ -407,6 +407,13 @@ class arcilator(BaseRunner):
             for tok in raw_args:
                 for k, v in subst.items():
                     tok = tok.replace(k, v)
+                # The driver runs with cwd=tmp_dir, so keep paths stable by
+                # resolving any user-provided relative paths against the tests
+                # root when they exist there.
+                if tok and not tok.startswith("-") and tests_root:
+                    candidate = _resolve_path(tok, tests_root)
+                    if os.path.exists(candidate):
+                        tok = candidate
                 driver_args.append(tok)
 
         # Linked-DUT cache: reuse import/arcilator outputs across tests that share
