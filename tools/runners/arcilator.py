@@ -227,6 +227,32 @@ class arcilator(BaseRunner):
                 continue
         return False
 
+    @staticmethod
+    def _module_has_ports(files, module_name: str) -> bool:
+        # Best-effort scan: if `module <name>(...);` has a non-empty port list,
+        # treat it as externally driveable. Most UVM "fake tops" are `module top;`
+        # or `module top();` and thus should return False here.
+        regex = re.compile(
+            rf"\bmodule\s+{re.escape(module_name)}\s*"
+            r"(?:#\s*\([^;]*?\)\s*)?"
+            r"\((?P<ports>[\s\S]*?)\)\s*;",
+            re.MULTILINE,
+        )
+        comment_re = re.compile(r"//.*?$|/\*[\s\S]*?\*/", re.MULTILINE)
+        for path in files:
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            m = regex.search(text)
+            if not m:
+                continue
+            ports = comment_re.sub("", m.group("ports"))
+            if ports.strip():
+                return True
+        return False
+
     def _pick_top_module(self, params):
         explicit = params.get("top_module") or ""
         if explicit:
@@ -256,7 +282,13 @@ class arcilator(BaseRunner):
             if uvm_mode in ("top", "tb", "testbench"):
                 if self._module_defined(params.get("files", []), "top"):
                     strict = _is_truthy_env("ARCILATOR_UVM_TOP_STRICT", default="0")
-                    if strict or self._contains_sva_property(params.get("files", [])):
+                    if strict:
+                        return "top"
+                    # Only select `module top` when it is driveable; otherwise,
+                    # fall back to running the DUT with a generated driver.
+                    if self._contains_sva_property(params.get("files", [])) and self._module_has_ports(
+                        params.get("files", []), "top"
+                    ):
                         return "top"
             return self.guess_top_module(params)
         if self._module_defined(params.get("files", []), "top"):
@@ -999,13 +1031,11 @@ seed = int(seed_s)
 vcd_dt = int(vcd_dt_s)
 test_path = test_path or ""
 tags = set((tags_s or "").split())
-enable_checks = os.environ.get("ARCILATOR_DRIVER_ASSERTS", "0").strip().lower() not in (
-  "",
-  "0",
-  "false",
-  "no",
-  "off",
-)
+raw_checks = os.environ.get("ARCILATOR_DRIVER_ASSERTS", "").strip().lower()
+if raw_checks == "":
+  enable_checks = ("uvm" in tags)
+else:
+  enable_checks = raw_checks not in ("0", "false", "no", "off")
 
 models = json.loads(pathlib.Path(state_json).read_text())
 if not models:
@@ -1033,6 +1063,33 @@ internal_states = [
   if s.get("name") and s.get("type") not in ("input", "output", "memory")
   and int(s.get("numBits", 0)) > 0
 ]
+
+states_by_name: dict[str, list[dict]] = {}
+states_by_leaf: dict[str, list[dict]] = {}
+for st in states:
+  name = st.get("name") or ""
+  if not name:
+    continue
+  states_by_name.setdefault(name, []).append(st)
+  leaf = name.split("/")[-1]
+  states_by_leaf.setdefault(leaf, []).append(st)
+
+def _pick_state(candidates: list[dict], preferred_types: list[str]) -> dict | None:
+  best: dict | None = None
+  best_rank = 10**9
+  for st in candidates:
+    st_type = str(st.get("type") or "")
+    rank = preferred_types.index(st_type) if st_type in preferred_types else len(preferred_types)
+    if best is None or rank < best_rank:
+      best = st
+      best_rank = rank
+  return best
+
+def find_state(name: str, preferred_types: list[str]) -> dict | None:
+  st = _pick_state(states_by_name.get(name, []), preferred_types)
+  if st is not None:
+    return st
+  return _pick_state(states_by_leaf.get(name, []), preferred_types)
 
 def byte_len(bits: int) -> int:
   return (bits + 7) // 8
@@ -1063,18 +1120,20 @@ def set_offset(offset: int, bits: int, val_expr: str, label: str = "") -> list[s
   ]
 
 def set_state(name: str, val_expr: str) -> list[str]:
-  st = port_by_name.get(name)
+  st = find_state(name, ["input", "wire", "register"])
   if not st:
     return [f"    // [skip] missing state: {name}"]
   return set_offset(int(st.get("offset", 0)), int(st.get("numBits", 0)), val_expr, label=name)
 
-def get_u64(name: str) -> tuple[int, int]:
-  st = port_by_name.get(name)
+def get_u64(name: str, preferred_types: list[str] | None = None) -> tuple[dict | None, int, int]:
+  if preferred_types is None:
+    preferred_types = ["output", "wire", "register", "input"]
+  st = find_state(name, preferred_types)
   if not st:
-    return (0, 0)
+    return (None, 0, 0)
   bits = int(st.get("numBits", 0))
   nbytes = byte_len(bits)
-  return (bits, nbytes)
+  return (st, bits, nbytes)
 
 def is_clk(name: str) -> bool:
   n = name.lower()
@@ -1102,83 +1161,311 @@ def is_test(suffix: str) -> bool:
 kind = "default"
 if is_test("chapter-16/16.2--assert0-uvm.sv") or is_test("chapter-16/16.2--assert-final-uvm.sv"):
   kind = "inverter_assert"
-elif is_test("chapter-16/16.2--assume-uvm.sv"):
-  kind = "adder_assume"
-elif is_test("chapter-16/16.7--sequence-uvm.sv"):
-  kind = "mem_ctrl"
+elif is_test("chapter-16/16.2--assert-uvm.sv") or is_test("chapter-16/16.2--assume-uvm.sv"):
+  kind = "adder_check"
+elif (
+  is_test("chapter-16/16.7--sequence-uvm.sv")
+  or is_test("chapter-16/16.12--property-prec-uvm.sv")
+  or is_test("chapter-16/16.12--property-interface-prec-uvm.sv")
+  or is_test("chapter-16/16.17--expect-uvm.sv")
+):
+  kind = "mem_ctrl_seq"
+elif (
+  is_test("chapter-16/16.12--property-uvm.sv")
+  or is_test("chapter-16/16.12--property-interface-uvm.sv")
+  or is_test("chapter-16/16.14--assume-property-uvm.sv")
+):
+  kind = "mem_ctrl_no_both"
+elif is_test("chapter-16/16.7--sequence-and-uvm.sv") or is_test("chapter-16/16.7--sequence-and-range-uvm.sv"):
+  kind = "mod_gnts_with_gnt2"
+elif is_test("chapter-16/16.7--sequence-or-uvm.sv") or is_test("chapter-16/16.7--sequence-intersect-uvm.sv"):
+  kind = "mod_gnts"
 elif is_test("chapter-16/16.7--sequence-throughout-uvm.sv"):
   kind = "mod_throughout"
-elif is_test("chapter-16/16.9--sequence-stable-uvm.sv"):
-  kind = "stable"
-elif is_test("chapter-16/16.10--sequence-local-var-uvm.sv") or is_test("chapter-16/16.11--sequence-subroutine-uvm.sv"):
+elif is_test("chapter-16/16.9--sequence-stable-uvm.sv") or is_test("chapter-16/16.9--sequence-fell-uvm.sv"):
+  kind = "clk_gen_out_final0"
+elif (
+  is_test("chapter-16/16.9--sequence-changed-uvm.sv")
+  or is_test("chapter-16/16.9--sequence-rose-uvm.sv")
+  or is_test("chapter-16/16.9--sequence-past-uvm.sv")
+):
+  kind = "clk_gen_out_final1"
+elif (
+  is_test("chapter-16/16.10--sequence-local-var-uvm.sv")
+  or is_test("chapter-16/16.10--property-local-var-uvm.sv")
+  or is_test("chapter-16/16.11--sequence-subroutine-uvm.sv")
+):
   kind = "clk_gen_pipe_valid"
 elif is_test("chapter-16/16.13--sequence-multiclock-uvm.sv"):
   kind = "multiclock"
-elif is_test("chapter-16/16.15--property-iff-uvm.sv"):
-  kind = "iff_rst_stuck_high"
+elif is_test("chapter-16/16.15--property-iff-uvm.sv") or is_test("chapter-16/16.15--property-iff-uvm-fail.sv"):
+  kind = "iff_rst"
 elif is_test("testbenches/uvm_driver_sequencer_env.sv"):
   kind = "dut_interface_echo"
 
 drive_lines: list[str] = []
+preamble_lines: list[str] = []
+loop_checks: list[str] = []
 final_checks: list[str] = []
+if enable_checks:
+  preamble_lines += [
+    "  auto load_u64 = [&](size_t offset, size_t nbytes) -> uint64_t {",
+    "    uint64_t v = 0;",
+    "    std::memcpy(&v, dut.view.state + offset, nbytes);",
+    "    return v;",
+    "  };",
+    "",
+  ]
 if kind == "inverter_assert":
   drive_lines += [
     "    // inverter_assert: drive a=8'h35 (matches UVM body).",
   ] + set_state("a", "0x35u")
   if enable_checks:
-    b_bits, b_nbytes = get_u64("b")
-    if b_nbytes and b_nbytes <= 8:
+    b_st, b_bits, b_nbytes = get_u64("b")
+    if b_st and b_nbytes and b_nbytes <= 8:
       final_checks += [
         "  // inverter_assert: check b != a (matches UVM assert).",
         "  {",
-        "    uint64_t b_val = 0;",
-        f"    std::memcpy(&b_val, dut.view.state + {int(port_by_name['b']['offset'])}, {b_nbytes});",
-        "    b_val &= 0xFFu;",
-        "    std::cout << \":assert: (\" << 0x35u << \" != \" << b_val << \")\\n\";",
+        f"    const uint64_t b_val = load_u64({int(b_st.get('offset', 0))}, {b_nbytes}) & 0xFFu;",
+        "    if (b_val == 0x35u) {",
+        "      std::cerr << \"assert failed :assert: (False)\" << \"\\n\";",
+        "      return 1;",
+        "    }",
         "  }",
       ]
-elif kind == "adder_assume":
+elif kind == "adder_check":
   drive_lines += [
-    "    // adder_assume: drive a=8'h35, b=8'h79, toggle clk.",
+    "    // adder_check: drive a=8'h35, b=8'h79, toggle clk.",
   ] + set_state("a", "0x35u") + set_state("b", "0x79u") + set_state("clk", "(t & 1u)")
   if enable_checks:
-    c_bits, c_nbytes = get_u64("c")
-    if c_nbytes and c_nbytes <= 8:
+    c_st, c_bits, c_nbytes = get_u64("c")
+    if c_st and c_nbytes and c_nbytes <= 8:
       mask = (1 << min(c_bits, 63)) - 1 if c_bits < 64 else 0xFFFFFFFFFFFFFFFF
       final_checks += [
-        "  // adder_assume: check c == a + b (matches UVM assume).",
+        "  // adder_check: check c == a + b (matches UVM assert/assume).",
         "  {",
-        "    uint64_t c_val = 0;",
-        f"    std::memcpy(&c_val, dut.view.state + {int(port_by_name['c']['offset'])}, {c_nbytes});",
-        f"    c_val &= {mask}ull;",
+        f"    const uint64_t c_val = load_u64({int(c_st.get('offset', 0))}, {c_nbytes}) & {mask}ull;",
         "    const uint64_t expect = 0x35u + 0x79u;",
-        "    std::cout << \":assert: (\" << c_val << \" == \" << expect << \")\\n\";",
+        "    if (c_val != expect) {",
+        "      std::cerr << \"c(\" << c_val << \") != a + b(\" << expect << \") :assert: (False)\" << \"\\n\";",
+        "      return 1;",
+        "    }",
         "  }",
       ]
-elif kind == "mem_ctrl":
+elif kind == "mem_ctrl_seq" or kind == "mem_ctrl_no_both":
   drive_lines += [
     "    // mem_ctrl: toggle clk and drive din with a simple pattern.",
   ] + set_state("clk", "(t & 1u)") + set_state("din", "((t >> 1) & 0xFFu)")
+  if enable_checks:
+    clk_st = find_state("clk", ["input", "wire", "register"])
+    read_st = find_state("read", ["output", "wire", "register"])
+    write_st = find_state("write", ["output", "wire", "register"])
+    if clk_st and read_st and write_st:
+      clk_off = int(clk_st.get("offset", 0))
+      clk_nbytes = byte_len(int(clk_st.get("numBits", 0)))
+      read_off = int(read_st.get("offset", 0))
+      read_nbytes = byte_len(int(read_st.get("numBits", 0)))
+      write_off = int(write_st.get("offset", 0))
+      write_nbytes = byte_len(int(write_st.get("numBits", 0)))
+
+      preamble_lines += [
+        "  // [assert] mem_ctrl",
+        "  bool mem_prev_clk_valid = false;",
+        "  bool mem_prev_clk = false;",
+        "  bool mem_prev_read = false;",
+        "  bool mem_saw_read_then_write = false;",
+        "",
+      ]
+
+      loop_checks += [
+        "    // [assert] mem_ctrl",
+        f"    const bool mem_clk = (load_u64({clk_off}, {clk_nbytes}) & 1u) != 0;",
+        "    const bool mem_posedge = mem_prev_clk_valid && (!mem_prev_clk) && mem_clk;",
+        "    mem_prev_clk_valid = true;",
+        "    mem_prev_clk = mem_clk;",
+        "    if (mem_posedge) {",
+        f"      const bool mem_read = (load_u64({read_off}, {read_nbytes}) & 1u) != 0;",
+        f"      const bool mem_write = (load_u64({write_off}, {write_nbytes}) & 1u) != 0;",
+        "      if (mem_read && mem_write) {",
+        "        std::cerr << \"read and write both asserted :assert: (False)\" << \"\\n\";",
+        "        return 1;",
+        "      }",
+        "      if (mem_prev_read) {",
+        "        if (!mem_write) {",
+        "          std::cerr << \"seq failed :assert: (False)\" << \"\\n\";",
+        "          return 1;",
+        "        }",
+        "        mem_saw_read_then_write = true;",
+        "      }",
+        "      mem_prev_read = mem_read;",
+        "    }",
+      ]
+
+      if kind == "mem_ctrl_seq":
+        final_checks += [
+          "  // [assert] mem_ctrl: require at least one read->write match.",
+          "  if (!mem_saw_read_then_write) {",
+          "    std::cerr << \"seq failed :assert: (False)\" << \"\\n\";",
+          "    return 1;",
+          "  }",
+        ]
 elif kind == "mod_throughout":
   drive_lines += [
     "    // mod_throughout: hold req high; toggle clk.",
   ] + set_state("req", "1u") + set_state("clk", "(t & 1u)")
-elif kind == "stable":
+  if enable_checks:
+    g0 = find_state("gnt0", ["output", "wire", "register"])
+    g1 = find_state("gnt1", ["output", "wire", "register"])
+    g2 = find_state("gnt2", ["output", "wire", "register"])
+    if g0 and g1 and g2:
+      g0_off = int(g0.get("offset", 0))
+      g0_nbytes = byte_len(int(g0.get("numBits", 0)))
+      g1_off = int(g1.get("offset", 0))
+      g1_nbytes = byte_len(int(g1.get("numBits", 0)))
+      g2_off = int(g2.get("offset", 0))
+      g2_nbytes = byte_len(int(g2.get("numBits", 0)))
+      final_checks += [
+        "  // [assert] mod_throughout: gnt0/gnt1/gnt2 should all become 1.",
+        f"  if (((load_u64({g0_off}, {g0_nbytes}) & 1u) == 0u) || ((load_u64({g1_off}, {g1_nbytes}) & 1u) == 0u) || ((load_u64({g2_off}, {g2_nbytes}) & 1u) == 0u)) {{",
+        "    std::cerr << \"seq failed :assert: (False)\" << \"\\n\";",
+        "    return 1;",
+        "  }",
+      ]
+elif kind == "mod_gnts" or kind == "mod_gnts_with_gnt2":
   drive_lines += [
-    "    // stable: just toggle clk.",
+    "    // mod_gnts: hold req high; toggle clk.",
+  ] + set_state("req", "1u") + set_state("clk", "(t & 1u)")
+  if enable_checks:
+    g0 = find_state("gnt0", ["output", "wire", "register"])
+    g1 = find_state("gnt1", ["output", "wire", "register"])
+    g2 = find_state("gnt2", ["output", "wire", "register"])
+    if g0 and g1 and (g2 if kind == "mod_gnts_with_gnt2" else True):
+      g0_off = int(g0.get("offset", 0))
+      g0_nbytes = byte_len(int(g0.get("numBits", 0)))
+      g1_off = int(g1.get("offset", 0))
+      g1_nbytes = byte_len(int(g1.get("numBits", 0)))
+      if g2:
+        g2_off = int(g2.get("offset", 0))
+        g2_nbytes = byte_len(int(g2.get("numBits", 0)))
+      else:
+        g2_off = 0
+        g2_nbytes = 0
+
+      checks = [
+        f"(load_u64({g0_off}, {g0_nbytes}) & 1u) != 0u",
+        f"(load_u64({g1_off}, {g1_nbytes}) & 1u) != 0u",
+      ]
+      if kind == "mod_gnts_with_gnt2":
+        checks.append(f"(load_u64({g2_off}, {g2_nbytes}) & 1u) != 0u")
+      cond = " && ".join(checks)
+      final_checks += [
+        "  // [assert] mod_gnts: expected grants should become 1.",
+        f"  if (!({cond})) {{",
+        "    std::cerr << \"seq failed :assert: (False)\" << \"\\n\";",
+        "    return 1;",
+        "  }",
+      ]
+elif kind == "clk_gen_out_final0" or kind == "clk_gen_out_final1":
+  drive_lines += [
+    "    // clk_gen: just toggle clk.",
   ] + set_state("clk", "(t & 1u)")
+  if enable_checks:
+    out_st, out_bits, out_nbytes = get_u64("out")
+    if out_st and out_nbytes and out_nbytes <= 8:
+      expect = "0u" if kind == "clk_gen_out_final0" else "1u"
+      final_checks += [
+        "  // [assert] clk_gen: check final out value.",
+        f"  if ((load_u64({int(out_st.get('offset', 0))}, {out_nbytes}) & 1u) != {expect}) {{",
+        "    std::cerr << \"seq failed :assert: (False)\" << \"\\n\";",
+        "    return 1;",
+        "  }",
+      ]
 elif kind == "clk_gen_pipe_valid":
   drive_lines += [
     "    // clk_gen_pipe_valid: hold valid high; toggle clk; ramp in.",
   ] + set_state("valid", "1u") + set_state("clk", "(t & 1u)") + set_state("in", "((t >> 1) & 0xFFu)")
+  if enable_checks:
+    clk_st = find_state("clk", ["input", "wire", "register"])
+    in_st = find_state("in", ["input", "wire", "register"])
+    out_st = find_state("out", ["output", "wire", "register"])
+    valid_st = find_state("valid", ["input", "wire", "register"])
+    if clk_st and in_st and out_st and valid_st:
+      clk_off = int(clk_st.get("offset", 0))
+      clk_nbytes = byte_len(int(clk_st.get("numBits", 0)))
+      in_off = int(in_st.get("offset", 0))
+      in_nbytes = byte_len(int(in_st.get("numBits", 0)))
+      out_off = int(out_st.get("offset", 0))
+      out_nbytes = byte_len(int(out_st.get("numBits", 0)))
+      valid_off = int(valid_st.get("offset", 0))
+      valid_nbytes = byte_len(int(valid_st.get("numBits", 0)))
+
+      preamble_lines += [
+        "  // [assert] clk_gen_pipe_valid: check out == in(t-3) + 4 when valid.",
+        "  bool pipe_prev_clk_valid = false;",
+        "  bool pipe_prev_clk = false;",
+        "  uint64_t pipe_count = 0;",
+        "  std::array<uint8_t, 8> pipe_in_hist{};",
+        "",
+      ]
+
+      loop_checks += [
+        "    // [assert] clk_gen_pipe_valid",
+        f"    const bool pipe_clk = (load_u64({clk_off}, {clk_nbytes}) & 1u) != 0;",
+        "    const bool pipe_posedge = pipe_prev_clk_valid && (!pipe_prev_clk) && pipe_clk;",
+        "    pipe_prev_clk_valid = true;",
+        "    pipe_prev_clk = pipe_clk;",
+        "    if (pipe_posedge) {",
+        f"      const bool pipe_valid = (load_u64({valid_off}, {valid_nbytes}) & 1u) != 0;",
+        f"      const uint8_t pipe_in = static_cast<uint8_t>(load_u64({in_off}, {in_nbytes}) & 0xFFu);",
+        f"      const uint8_t pipe_out = static_cast<uint8_t>(load_u64({out_off}, {out_nbytes}) & 0xFFu);",
+        "      if (pipe_valid) {",
+        "        pipe_in_hist[pipe_count & 7u] = pipe_in;",
+        "        ++pipe_count;",
+        "        if (pipe_count >= 4) {",
+        "          const uint8_t expect = static_cast<uint8_t>(pipe_in_hist[(pipe_count - 4) & 7u] + 4u);",
+        "          if (pipe_out != expect) {",
+        "            std::cerr << \"sequence check failed :assert: (False)\" << \"\\n\";",
+        "            return 1;",
+        "          }",
+        "        }",
+        "      }",
+        "    }",
+      ]
 elif kind == "multiclock":
   drive_lines += [
     "    // multiclock: drive clk0 and clk1 at different rates.",
   ] + set_state("clk0", "(t & 1u)") + set_state("clk1", "((t / 3) & 1u)")
-elif kind == "iff_rst_stuck_high":
+  if enable_checks:
+    out0 = find_state("out0", ["output", "wire", "register"])
+    out1 = find_state("out1", ["output", "wire", "register"])
+    if out0 and out1:
+      out0_off = int(out0.get("offset", 0))
+      out0_nbytes = byte_len(int(out0.get("numBits", 0)))
+      out1_off = int(out1.get("offset", 0))
+      out1_nbytes = byte_len(int(out1.get("numBits", 0)))
+      final_checks += [
+        "  // [assert] multiclock: out0/out1 should both become 1.",
+        f"  if (((load_u64({out0_off}, {out0_nbytes}) & 1u) == 0u) || ((load_u64({out1_off}, {out1_nbytes}) & 1u) == 0u)) {{",
+        "    std::cerr << \"sequence check failed :assert: (False)\" << \"\\n\";",
+        "    return 1;",
+        "  }",
+      ]
+elif kind == "iff_rst":
   drive_lines += [
-    "    // iff_rst_stuck_high: keep rst asserted; toggle clk.",
-  ] + set_state("rst", "1u") + set_state("clk", "(t & 1u)")
+    "    // iff_rst: pulse rst; toggle clk.",
+  ] + set_state("rst", "(t < kResetSteps) ? 1u : 0u") + set_state("clk", "(t & 1u)")
+  if enable_checks:
+    out = find_state("out", ["output", "wire", "register"])
+    if out:
+      out_off = int(out.get("offset", 0))
+      out_nbytes = byte_len(int(out.get("numBits", 0)))
+      final_checks += [
+        "  // [assert] iff_rst: out should be 1 after reset deassertion.",
+        f"  if ((load_u64({out_off}, {out_nbytes}) & 1u) == 0u) {{",
+        "    std::cerr << \"property check failed :assert: (False)\" << \"\\n\";",
+        "    return 1;",
+        "  }",
+      ]
 elif kind == "dut_interface_echo" and "in" in in_bits and in_bits.get("in", 0) <= 64:
   # UVM dut has interface modport args. In the lowered model, they show up as a
   # packed integer input. Empirically this is 16b: [7:0]=data, [15:8]=clk (LSB).
@@ -1288,6 +1575,9 @@ lines += [
   "  if (!vcd) { std::cerr << \"failed to open VCD output: \" << vcd_path << \"\\n\"; return 1; }",
   "  auto vcd_writer = dut.vcd(vcd);",
   "",
+]
+lines += preamble_lines
+lines += [
   "  // Drive initial input values (t=0).",
   "  {",
   "    const uint64_t t = 0;",
@@ -1305,6 +1595,9 @@ lines += drive_lines
 
 lines += [
   "    write_step(dut, vcd_writer, kVcdDt);",
+]
+lines += loop_checks
+lines += [
   "  }",
 ]
 lines += final_checks
