@@ -284,11 +284,16 @@ class arcilator(BaseRunner):
                     strict = _is_truthy_env("ARCILATOR_UVM_TOP_STRICT", default="0")
                     if strict:
                         return "top"
-                    # Only select `module top` when it is driveable; otherwise,
-                    # fall back to running the DUT with a generated driver.
-                    if self._contains_sva_property(params.get("files", [])) and self._module_has_ports(
-                        params.get("files", []), "top"
-                    ):
+                    # Only select `module top` when it contains concurrent
+                    # assertions. Most UVM suites include class-heavy benches
+                    # that arcilator cannot truly execute; selecting those
+                    # would lead to vacuous passes. For assertion-oriented
+                    # tests, `module top` is often portless and drives its own
+                    # clocks/resets procedurally; the generated driver can
+                    # still poke internal clk/rst signals by name when there
+                    # are no input ports, so a non-empty port list is not a
+                    # requirement here.
+                    if self._contains_sva_property(params.get("files", [])):
                         return "top"
             return self.guess_top_module(params)
         if self._module_defined(params.get("files", []), "top"):
