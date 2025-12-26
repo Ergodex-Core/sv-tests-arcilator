@@ -1037,6 +1037,12 @@ if raw_checks == "":
 else:
   enable_checks = raw_checks not in ("0", "false", "no", "off")
 
+raw_uvm_hdl = os.environ.get("ARCILATOR_UVM_HDL", "").strip().lower()
+if raw_uvm_hdl == "":
+  enable_uvm_hdl = ("uvm" in tags)
+else:
+  enable_uvm_hdl = raw_uvm_hdl not in ("0", "false", "no", "off")
+
 models = json.loads(pathlib.Path(state_json).read_text())
 if not models:
   sys.stderr.write("empty state.json\n")
@@ -1093,6 +1099,9 @@ def find_state(name: str, preferred_types: list[str]) -> dict | None:
 
 def byte_len(bits: int) -> int:
   return (bits + 7) // 8
+
+def cpp_str(text: str) -> str:
+  return "\"" + str(text).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 def set_offset(offset: int, bits: int, val_expr: str, label: str = "") -> list[str]:
   nbytes = byte_len(bits)
@@ -1558,6 +1567,14 @@ lines += [
   "#include <fstream>",
   "#include <iostream>",
   "#include \"model.hpp\"",
+]
+if enable_uvm_hdl:
+  lines += [
+    "#include <string>",
+    "#include <string_view>",
+    "#include <unordered_map>",
+  ]
+lines += [
   "",
   "static uint64_t parse_u64_env(const char *name, uint64_t default_value) {",
   "  const char *s = std::getenv(name);",
@@ -1568,6 +1585,182 @@ lines += [
   "  return static_cast<uint64_t>(v);",
   "}",
   "",
+]
+
+if enable_uvm_hdl:
+  hdl_entries = []
+  for st in states:
+    name = st.get("name") or ""
+    if not name:
+      continue
+    st_type = str(st.get("type") or "")
+    if st_type not in ("input", "output", "register", "wire", "memory"):
+      continue
+    bits = int(st.get("numBits", 0))
+    if bits <= 0:
+      continue
+    off = int(st.get("offset", 0))
+    stride = int(st.get("stride", 0))
+    depth = int(st.get("depth", 0))
+    hdl_entries.append(
+      "  {" + cpp_str(name) + f", {off}u, {bits}u, {stride}u, {depth}u" + "},"
+    )
+
+  lines += [
+    "extern \"C\" {",
+    "struct svLogicVecVal { uint32_t aval; uint32_t bval; };",
+    "}",
+    "",
+    "struct ArcilatorHdlEntry {",
+    "  const char* name;",
+    "  uint32_t offset;",
+    "  uint32_t numBits;",
+    "  uint32_t stride;",
+    "  uint32_t depth;",
+    "};",
+    "",
+    "static const ArcilatorHdlEntry kArcilatorHdl[] = {",
+  ]
+  lines += hdl_entries
+  lines += [
+    "};",
+    "",
+    "static uint8_t* g_arcilator_state = nullptr;",
+    f"static const char* kArcilatorModelName = {cpp_str(model_name)};",
+    "",
+    "extern \"C\" void arcilator_uvm_set_state(uint8_t* state) {",
+    "  g_arcilator_state = state;",
+    "}",
+    "",
+    "static std::string normalize_uvm_path(const char* path) {",
+    "  std::string out;",
+    "  if (!path) return out;",
+    "  out.reserve(std::strlen(path));",
+    "  for (const char* p = path; *p; ++p) {",
+    "    char c = *p;",
+    "    if (c == '.') c = '/';",
+    "    out.push_back(c);",
+    "  }",
+    "  while (!out.empty() && out.front() == '/') out.erase(out.begin());",
+    "  return out;",
+    "}",
+    "",
+    "static const std::unordered_map<std::string_view, const ArcilatorHdlEntry*>& get_arcilator_hdl_map() {",
+    "  static const auto* map = []() {",
+    "    auto* m = new std::unordered_map<std::string_view, const ArcilatorHdlEntry*>();",
+    f"    m->reserve({len(hdl_entries)}u);",
+    "    for (const auto& e : kArcilatorHdl) (*m)[e.name] = &e;",
+    "    return m;",
+    "  }();",
+    "  return *map;",
+    "}",
+    "",
+    "static const ArcilatorHdlEntry* find_arcilator_entry(std::string_view key) {",
+    "  const auto& m = get_arcilator_hdl_map();",
+    "  auto it = m.find(key);",
+    "  if (it == m.end()) return nullptr;",
+    "  return it->second;",
+    "}",
+    "",
+    "static const ArcilatorHdlEntry* resolve_arcilator_entry(const char* path) {",
+    "  std::string norm = normalize_uvm_path(path);",
+    "  if (norm.empty()) return nullptr;",
+    "  if (auto* e = find_arcilator_entry(norm)) return e;",
+    "  if (kArcilatorModelName && *kArcilatorModelName) {",
+    "    std::string with = std::string(kArcilatorModelName) + \"/\" + norm;",
+    "    if (auto* e = find_arcilator_entry(with)) return e;",
+    "    if (norm.rfind(\"top/\", 0) == 0) {",
+    "      std::string with2 = std::string(kArcilatorModelName) + \"/\" + norm.substr(4);",
+    "      if (auto* e = find_arcilator_entry(with2)) return e;",
+    "    }",
+    "  }",
+    "  return nullptr;",
+    "}",
+    "",
+    "static constexpr uint32_t kUvmHdlMaxBits = 1024u;",
+    "static constexpr uint32_t kUvmHdlWords = (kUvmHdlMaxBits + 31u) / 32u;",
+    "",
+    "static void uvm_vec_clear(svLogicVecVal* value) {",
+    "  if (!value) return;",
+    "  for (uint32_t i = 0; i < kUvmHdlWords; ++i) {",
+    "    value[i].aval = 0;",
+    "    value[i].bval = 0;",
+    "  }",
+    "}",
+    "",
+    "static void copy_from_state(const uint8_t* src, uint32_t numBits, svLogicVecVal* dst) {",
+    "  uvm_vec_clear(dst);",
+    "  if (!src || !dst) return;",
+    "  const uint32_t numBytes = (numBits + 7u) / 8u;",
+    "  const uint32_t numWords = (numBits + 31u) / 32u;",
+    "  for (uint32_t w = 0; w < numWords && w < kUvmHdlWords; ++w) {",
+    "    uint32_t aval = 0;",
+    "    const uint32_t base = w * 4u;",
+    "    const uint32_t rem = (base < numBytes) ? (numBytes - base) : 0u;",
+    "    const uint32_t take = (rem >= 4u) ? 4u : rem;",
+    "    if (take) std::memcpy(&aval, src + base, take);",
+    "    dst[w].aval = aval;",
+    "    dst[w].bval = 0;",
+    "  }",
+    "  const uint32_t tail = numBits % 32u;",
+    "  if (tail && numWords && numWords <= kUvmHdlWords) {",
+    "    const uint32_t mask = (1u << tail) - 1u;",
+    "    dst[numWords - 1u].aval &= mask;",
+    "  }",
+    "}",
+    "",
+    "static void copy_to_state(const svLogicVecVal* src, uint32_t numBits, uint8_t* dst) {",
+    "  if (!src || !dst) return;",
+    "  const uint32_t numBytes = (numBits + 7u) / 8u;",
+    "  const uint32_t numWords = (numBits + 31u) / 32u;",
+    "  for (uint32_t w = 0; w < numWords && w < kUvmHdlWords; ++w) {",
+    "    const uint32_t aval = src[w].aval;",
+    "    const uint32_t base = w * 4u;",
+    "    const uint32_t rem = (base < numBytes) ? (numBytes - base) : 0u;",
+    "    const uint32_t take = (rem >= 4u) ? 4u : rem;",
+    "    if (take) std::memcpy(dst + base, &aval, take);",
+    "  }",
+    "}",
+    "",
+    "extern \"C\" int uvm_hdl_check_path(const char* path) {",
+    "  if (!g_arcilator_state) return 0;",
+    "  return resolve_arcilator_entry(path) ? 1 : 0;",
+    "}",
+    "",
+    "extern \"C\" int uvm_hdl_read(const char* path, svLogicVecVal* value) {",
+    "  if (!g_arcilator_state) return 0;",
+    "  auto* e = resolve_arcilator_entry(path);",
+    "  if (!e) return 0;",
+    "  copy_from_state(g_arcilator_state + e->offset, e->numBits, value);",
+    "  return 1;",
+    "}",
+    "",
+    "extern \"C\" int uvm_hdl_deposit(const char* path, const svLogicVecVal* value) {",
+    "  if (!g_arcilator_state) return 0;",
+    "  auto* e = resolve_arcilator_entry(path);",
+    "  if (!e) return 0;",
+    "  copy_to_state(value, e->numBits, g_arcilator_state + e->offset);",
+    "  return 1;",
+    "}",
+    "",
+    "extern \"C\" int uvm_hdl_force(const char* path, const svLogicVecVal* value) {",
+    "  return uvm_hdl_deposit(path, value);",
+    "}",
+    "",
+    "extern \"C\" int uvm_hdl_release(const char* path) {",
+    "  (void)path;",
+    "  return g_arcilator_state ? 1 : 0;",
+    "}",
+    "",
+    "extern \"C\" int uvm_hdl_release_and_read(const char* path, svLogicVecVal* value) {",
+    "  if (!g_arcilator_state) return 0;",
+    "  (void)uvm_hdl_release(path);",
+    "  return uvm_hdl_read(path, value);",
+    "}",
+    "",
+  ]
+
+lines += [
   "int main(int argc, char** argv) {",
   f"  constexpr uint64_t kSteps = {cycles};",
   f"  constexpr uint64_t kResetSteps = {reset_cycles};",
@@ -1580,6 +1773,12 @@ lines += [
   "  uint64_t sim_time = 0;",
   "  bool prev_trace = false;",
   f"  {model_name} dut;",
+]
+if enable_uvm_hdl:
+  lines += [
+    "  arcilator_uvm_set_state(dut.view.state);",
+  ]
+lines += [
   "  const char* vcd_path = (argc > 1) ? argv[1] : \"wave.vcd\";",
   "  std::ofstream vcd(vcd_path);",
   "  if (!vcd) { std::cerr << \"failed to open VCD output: \" << vcd_path << \"\\n\"; return 1; }",
