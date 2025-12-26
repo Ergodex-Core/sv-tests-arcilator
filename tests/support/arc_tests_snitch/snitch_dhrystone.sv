@@ -12,7 +12,7 @@
 :
 :runner_arcilator_driver: ../../arc-tests/snitch/snitch-main.cpp
 :runner_arcilator_driver_files: ../../arc-tests/snitch/snitch-model-arc.cpp
-:runner_arcilator_driver_incdirs: ../../arc-tests ../../arc-tests/snitch
+:runner_arcilator_driver_incdirs: ../../arc-tests ../../arc-tests/elfio ../../arc-tests/snitch
 :runner_arcilator_driver_cxxflags: -DRUN_ARC
 :runner_arcilator_driver_args: --trace {VCD} ../../arc-tests/benchmarks/dhrystone_rv32i.riscv
 :runner_arcilator_header_basename: snitch-arc.h
