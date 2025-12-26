@@ -4,6 +4,7 @@
 :tags: uvm
 :type: simulation
 :timeout: 120
+:compatible-runners: arcilator
 :top_module: top
 :runner_arcilator_flags: --observe-memories
 */
