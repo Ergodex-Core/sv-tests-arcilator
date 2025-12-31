@@ -10,8 +10,15 @@
 # SPDX-License-Identifier: ISC
 
 import os
+import shutil
 
 from BaseRunner import BaseRunner
+
+
+def _abspath_or_empty(path: str) -> str:
+    if not path:
+        return ""
+    return os.path.abspath(path)
 
 
 class circt_verilog_nostub(BaseRunner):
@@ -20,9 +27,20 @@ class circt_verilog_nostub(BaseRunner):
         name="circt-verilog",
         supported_features={"preprocessing", "parsing", "elaboration"},
     ):
+        svtests_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+        )
+        default_bin_dir = os.path.join(svtests_root, "circt-build", "bin")
+        bin_dir = os.environ.get("CIRCT_BIN_DIR", default_bin_dir)
+        circt_verilog = (
+            os.environ.get("CIRCT_VERILOG_BIN")
+            or shutil.which("circt-verilog")
+            or os.path.join(bin_dir, "circt-verilog")
+        )
+
         super().__init__(
             name,
-            executable="circt-verilog",
+            executable=_abspath_or_empty(circt_verilog),
             supported_features=supported_features)
 
         self.submodule = "third_party/tools/circt-verilog"

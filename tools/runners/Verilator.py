@@ -90,6 +90,16 @@ class Verilator(BaseRunner):
 
         with open(scr, 'w') as f:
             f.write('set -x\n')
+            # The Codex sandbox often disallows writes outside the workspace,
+            # which breaks ccache's default temp location under /run/user.
+            # Redirect ccache state into the per-test tmp dir.
+            f.write('export CCACHE_DIR="$PWD/ccache"\n')
+            f.write('export CCACHE_TEMPDIR="$PWD/ccache-tmp"\n')
+            f.write('mkdir -p "$CCACHE_DIR" "$CCACHE_TEMPDIR"\n')
             f.write('{0} "$@" || exit $?\n'.format(self.executable))
             if mode == 'simulation':
-                f.write(f'./{build_dir}/{build_name}\n')
+                sim_args = shlex.split(os.environ.get("SVTESTS_SIM_ARGS", ""))
+                sim_args_str = " ".join(shlex.quote(a) for a in sim_args)
+                if sim_args_str:
+                    sim_args_str = " " + sim_args_str
+                f.write(f'./{build_dir}/{build_name}{sim_args_str}\n')

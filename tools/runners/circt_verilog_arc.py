@@ -12,26 +12,52 @@ import shutil
 from BaseRunner import BaseRunner
 
 
+def _is_executable(path: str) -> bool:
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _abspath_or_empty(path: str) -> str:
+    if not path:
+        return ""
+    return os.path.abspath(path)
+
+
 class circt_verilog_arc(BaseRunner):
     """Run circt-verilog on a test and immediately feed the emitted MLIR into
     arcilator so the Arc/LLVM pipeline is exercised (even if it currently
     fails)."""
 
     def __init__(self):
+        svtests_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+        )
+        default_bin_dir = os.path.join(svtests_root, "circt-build", "bin")
+        bin_dir = os.environ.get("CIRCT_BIN_DIR", default_bin_dir)
+
+        circt_verilog = (
+            os.environ.get("CIRCT_VERILOG_BIN")
+            or shutil.which("circt-verilog")
+            or os.path.join(bin_dir, "circt-verilog")
+        )
+        arcilator = (
+            os.environ.get("ARCILATOR_BIN")
+            or shutil.which("arcilator")
+            or os.path.join(bin_dir, "arcilator")
+        )
+
         super().__init__(
             name="circt-verilog-arc",
-            executable="circt-verilog",
+            executable=_abspath_or_empty(circt_verilog),
             # Accept parsing so parsing-only tests still exercise the pipeline.
             supported_features={"parsing", "elaboration"},
         )
-        self.arc_executable = "arcilator"
+        self.arc_executable = _abspath_or_empty(arcilator)
         self.submodule = "third_party/tools/circt-verilog"
         self.url = f"https://github.com/llvm/circt/tree/{self.get_commit()}"
 
     def can_run(self):
         """Both circt-verilog and arcilator need to be built."""
-        return (shutil.which(self.executable) is not None and
-                shutil.which(self.arc_executable) is not None)
+        return _is_executable(self.executable) and _is_executable(self.arc_executable)
 
     def prepare_run_cb(self, tmp_dir, params):
         ir_path = os.path.join(tmp_dir, "imported.mlir")

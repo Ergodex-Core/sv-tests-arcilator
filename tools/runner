@@ -53,6 +53,30 @@ logger.addHandler(ch)
 
 runner_obj = None
 
+_UVM_TB_MARKER = "SVTESTS_UVM_M0_RAN"
+
+
+def _is_truthy_env(name: str, default: str = "0") -> bool:
+    val = os.environ.get(name, default)
+    return str(val).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _looks_like_uvm_testbench(files) -> bool:
+    # Heuristic to distinguish "real UVM testbench" sources (class-based TB
+    # that executes) from incidental `:tags: uvm` uses (e.g. uvm_hdl_* selftests).
+    # We require an explicit `run_test(...)` entry point; many UVM-tagged tests
+    # are class-only smoke checks that should not be forced through the M0
+    # "phases done" assertion.
+    uvm_re = re.compile(r"\brun_test\s*\(")
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                if uvm_re.search(f.read()):
+                    return True
+        except OSError:
+            continue
+    return False
+
 if 'RUNNERS_DIR' in os.environ:
     sys.path.insert(1, os.path.abspath(os.environ['RUNNERS_DIR']))
 
@@ -217,6 +241,10 @@ if has_uvm_stub:
         if os.path.basename(path) != "uvm_stub_pkg.sv"
     ]
 
+# Keep a copy of the "user" file list (before libs injection) for heuristics
+# such as distinguishing UVM testbenches from incidental UVM-tagged tests.
+user_files_for_uvm_m0 = list(test_params['files'])
+
 for key in libs.keys():
     if key in test_params['tags']:
         test_params['files'] = [
@@ -229,6 +257,26 @@ for key in libs.keys():
         ] + test_params['incdirs']
 
 test_params['defines'] = test_params['defines'].split()
+
+# UVM M0: inject an end-of-sim UVM report check for real UVM testbenches.
+# Defaults to on; disable with SVTESTS_UVM_M0=0.
+uvm_m0_enabled = (
+    test_params['mode'] == "simulation"
+    and "uvm" in test_params.get("tags", "")
+    and _is_truthy_env("SVTESTS_UVM_M0", default="1")
+    and _looks_like_uvm_testbench(user_files_for_uvm_m0)
+    # For arcilator runs, require an explicit opt-out (SVTESTS_UVM_M0_ARCILATOR=0)
+    # rather than an opt-in. UVM-tagged "PASS" results are meaningless if the
+    # testbench does not actually execute.
+    and (runner_obj.name != "arcilator"
+         or _is_truthy_env("SVTESTS_UVM_M0_ARCILATOR", default="1"))
+)
+if uvm_m0_enabled:
+    wrapper = os.path.abspath(
+        os.path.join(dirs['tests'], "support", "svtests_uvm_m0.sv"))
+    test_params['files'].append(wrapper)
+    top_for_bind = test_params.get("top_module") or "top"
+    test_params['defines'].append(f"SVTESTS_UVM_BIND_MODULE={top_for_bind}")
 
 # Filter test files based on what the runner claims to support.
 filtered_files = []
@@ -286,6 +334,17 @@ try:
     tool_crashed = rc >= 126
 
     test_passed = not tool_crashed and tool_should_fail == tool_failed
+
+    # UVM M0: require an explicit runtime marker for UVM testbenches. This
+    # avoids vacuous "PASS" results when a runner does not actually execute
+    # the SystemVerilog/UVM testbench (e.g. DUT-only flows).
+    marker_seen = re.search(rf"(?m)^{re.escape(_UVM_TB_MARKER)}\s*$", output)
+    if (test_passed and test_params['mode'] == 'simulation' and uvm_m0_enabled
+            and tool_success and not tool_should_fail and not marker_seen):
+        output += (
+            f"\n[sv-tests] Missing {_UVM_TB_MARKER} marker from UVM M0 wrapper; "
+            "testbench likely did not execute.\n"
+            ":assert: (False)\n")
 
     if test_passed and test_params['mode'] == 'simulation':
         test_passed = parseLog(output)
