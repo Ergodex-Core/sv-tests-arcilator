@@ -15,6 +15,10 @@
 module svtests_uvm_m0;
   import uvm_pkg::*;
 
+  int svtests_errors = 0;
+  int svtests_fatals = 0;
+  bit svtests_phases_done = 0;
+
   final begin
     uvm_report_server rs;
     uvm_root root;
@@ -27,11 +31,15 @@ module svtests_uvm_m0;
     fatals = rs.get_severity_count(UVM_FATAL);
     phases_done = (root != null) ? root.m_phase_all_done : 0;
 
+    svtests_errors = errors;
+    svtests_fatals = fatals;
+    svtests_phases_done = phases_done;
+
     $display("SVTESTS_UVM_M0_RAN");
-    $display("SVTESTS_UVM_M0_ERRORS=%0d", errors);
-    $display("SVTESTS_UVM_M0_FATALS=%0d", fatals);
-    $display("SVTESTS_UVM_M0_PHASES_DONE=%0d", phases_done);
-    $display(":assert: (%0d == 0) and (%0d == 1)", errors + fatals, phases_done);
+    $display("SVTESTS_UVM_M0_ERRORS=%0d", svtests_errors);
+    $display("SVTESTS_UVM_M0_FATALS=%0d", svtests_fatals);
+    $display("SVTESTS_UVM_M0_PHASES_DONE=%0d", svtests_phases_done);
+    $display(":assert: (%0d == 0) and (%0d == 1)", svtests_errors + svtests_fatals, svtests_phases_done);
   end
 endmodule
 

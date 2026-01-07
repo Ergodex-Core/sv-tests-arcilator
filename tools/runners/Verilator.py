@@ -92,8 +92,13 @@ class Verilator(BaseRunner):
             f.write('set -x\n')
             # The Codex sandbox often disallows writes outside the workspace,
             # which breaks ccache's default temp location under /run/user.
-            # Redirect ccache state into the per-test tmp dir.
-            f.write('export CCACHE_DIR="$PWD/ccache"\n')
+            # Redirect ccache into OUT_DIR so it can be shared across tests,
+            # while keeping temp files under the per-test tmp dir.
+            f.write('if [ -z "${CCACHE_DIR:-}" ]; then\n')
+            f.write(
+                '  export CCACHE_DIR="${VERILATOR_CCACHE_DIR:-${OUT_DIR:-$PWD}/ccache/verilator}"\n'
+            )
+            f.write('fi\n')
             f.write('export CCACHE_TEMPDIR="$PWD/ccache-tmp"\n')
             f.write('mkdir -p "$CCACHE_DIR" "$CCACHE_TEMPDIR"\n')
             f.write('{0} "$@" || exit $?\n'.format(self.executable))

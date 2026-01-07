@@ -163,18 +163,22 @@ class arcilator(BaseRunner):
         third_party_arcilator_dir = os.path.join(
             svtests_root, "third_party", "tools", "circt-verilog", "tools", "arcilator"
         )
-        default_header_gen = os.path.join(self._bin_dir, "arcilator-header-cpp.py")
+        # Prefer the in-tree generator/runtime headers since they are the
+        # source of truth for local development; the copies in circt-build/bin
+        # can get stale across incremental rebuilds.
+        default_header_gen = os.path.join(
+            third_party_arcilator_dir, "arcilator-header-cpp.py"
+        )
         if not os.path.isfile(default_header_gen):
-            default_header_gen = os.path.join(third_party_arcilator_dir,
-                                             "arcilator-header-cpp.py")
+            default_header_gen = os.path.join(self._bin_dir, "arcilator-header-cpp.py")
         self._header_gen = _abspath_or_empty(
             os.environ.get("ARCILATOR_HEADER_GEN", default_header_gen)
         )
 
         # Directory that contains arcilator-runtime.h (included by generated headers).
-        default_runtime_inc = self._bin_dir
+        default_runtime_inc = third_party_arcilator_dir
         if not os.path.isfile(os.path.join(default_runtime_inc, "arcilator-runtime.h")):
-            default_runtime_inc = third_party_arcilator_dir
+            default_runtime_inc = self._bin_dir
         self._runtime_inc = _abspath_or_empty(
             os.environ.get("ARCILATOR_RUNTIME_INC", default_runtime_inc)
         )
@@ -1107,6 +1111,34 @@ def byte_len(bits: int) -> int:
 def cpp_str(text: str) -> str:
   return "\"" + str(text).replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+def is_four_state(st: dict) -> bool:
+  return int(st.get("valueOffset", 0)) != int(st.get("unknownOffset", 0))
+
+def value_byte_offset(st: dict) -> int:
+  off = int(st.get("offset", 0))
+  if is_four_state(st):
+    off += int(st.get("valueOffset", 0))
+  return off
+
+def unknown_byte_offset(st: dict) -> int:
+  off = int(st.get("offset", 0))
+  if is_four_state(st):
+    off += int(st.get("unknownOffset", 0))
+  return off
+
+def four_state_field_bytes(st: dict) -> int:
+  if not is_four_state(st):
+    return 0
+  vo = int(st.get("valueOffset", 0))
+  uo = int(st.get("unknownOffset", 0))
+  delta = abs(vo - uo)
+  if delta:
+    return delta
+  sb = int(st.get("storageBytes", 0))
+  if sb and (sb % 2 == 0):
+    return sb // 2
+  return byte_len(int(st.get("numBits", 0)))
+
 def set_offset(offset: int, bits: int, val_expr: str, label: str = "") -> list[str]:
   nbytes = byte_len(bits)
   if nbytes == 0:
@@ -1132,21 +1164,43 @@ def set_offset(offset: int, bits: int, val_expr: str, label: str = "") -> list[s
     "    }",
   ]
 
+def set_state_dict(st: dict, val_expr: str, label: str = "") -> list[str]:
+  bits = int(st.get("numBits", 0))
+  if bits <= 0:
+    if label:
+      return [f"    // [skip] {label} has 0 bits"]
+    return ["    // [skip] 0-bit"]
+  if not is_four_state(st):
+    return set_offset(value_byte_offset(st), bits, val_expr, label=label)
+
+  field_bytes = four_state_field_bytes(st)
+  if field_bytes <= 0:
+    return set_offset(value_byte_offset(st), bits, val_expr, label=label)
+
+  uoff = unknown_byte_offset(st)
+  voff = value_byte_offset(st)
+  return [
+    "    {",
+    f"      std::memset(dut.view.state + {uoff}, 0, {field_bytes});",
+    f"      std::memset(dut.view.state + {voff}, 0, {field_bytes});",
+    "    }",
+  ] + set_offset(voff, bits, val_expr, label=label)
+
 def set_state(name: str, val_expr: str) -> list[str]:
   st = find_state(name, ["input", "wire", "register"])
   if not st:
     return [f"    // [skip] missing state: {name}"]
-  return set_offset(int(st.get("offset", 0)), int(st.get("numBits", 0)), val_expr, label=name)
+  return set_state_dict(st, val_expr, label=name)
 
-def get_u64(name: str, preferred_types: list[str] | None = None) -> tuple[dict | None, int, int]:
+def get_u64(name: str, preferred_types: list[str] | None = None) -> tuple[dict | None, int, int, int]:
   if preferred_types is None:
     preferred_types = ["output", "wire", "register", "input"]
   st = find_state(name, preferred_types)
   if not st:
-    return (None, 0, 0)
+    return (None, 0, 0, 0)
   bits = int(st.get("numBits", 0))
   nbytes = byte_len(bits)
-  return (st, bits, nbytes)
+  return (st, bits, nbytes, value_byte_offset(st))
 
 def is_clk(name: str) -> bool:
   n = name.lower()
@@ -1171,55 +1225,63 @@ def should_hold_high(name: str) -> bool:
 def is_test(suffix: str) -> bool:
   return test_path.endswith(suffix)
 
-kind = "default"
-if is_test("chapter-16/16.2--assert0-uvm.sv") or is_test("chapter-16/16.2--assert-final-uvm.sv"):
-  kind = "inverter_assert"
-elif is_test("chapter-16/16.2--assert-uvm.sv") or is_test("chapter-16/16.2--assume-uvm.sv"):
-  kind = "adder_check"
-elif (
-  is_test("chapter-16/16.7--sequence-uvm.sv")
-  or is_test("chapter-16/16.12--property-prec-uvm.sv")
-  or is_test("chapter-16/16.12--property-interface-prec-uvm.sv")
-  or is_test("chapter-16/16.17--expect-uvm.sv")
-):
-  kind = "mem_ctrl_seq"
-elif (
-  is_test("chapter-16/16.12--property-uvm.sv")
-  or is_test("chapter-16/16.12--property-interface-uvm.sv")
-  or is_test("chapter-16/16.14--assume-property-uvm.sv")
-):
-  kind = "mem_ctrl_no_both"
-elif is_test("chapter-16/16.7--sequence-and-uvm.sv") or is_test("chapter-16/16.7--sequence-and-range-uvm.sv"):
-  kind = "mod_gnts_with_gnt2"
-elif is_test("chapter-16/16.7--sequence-or-uvm.sv") or is_test("chapter-16/16.7--sequence-intersect-uvm.sv"):
-  kind = "mod_gnts"
-elif is_test("chapter-16/16.7--sequence-throughout-uvm.sv"):
-  kind = "mod_throughout"
-elif is_test("chapter-16/16.9--sequence-stable-uvm.sv") or is_test("chapter-16/16.9--sequence-fell-uvm.sv"):
-  kind = "clk_gen_out_final0"
-elif (
-  is_test("chapter-16/16.9--sequence-changed-uvm.sv")
-  or is_test("chapter-16/16.9--sequence-rose-uvm.sv")
-  or is_test("chapter-16/16.9--sequence-past-uvm.sv")
-):
-  kind = "clk_gen_out_final1"
-elif (
-  is_test("chapter-16/16.10--sequence-local-var-uvm.sv")
-  or is_test("chapter-16/16.10--property-local-var-uvm.sv")
-  or is_test("chapter-16/16.11--sequence-subroutine-uvm.sv")
-):
-  kind = "clk_gen_pipe_valid"
-elif is_test("chapter-16/16.13--sequence-multiclock-uvm.sv"):
-  kind = "multiclock"
-elif is_test("chapter-16/16.15--property-iff-uvm.sv") or is_test("chapter-16/16.15--property-iff-uvm-fail.sv"):
-  kind = "iff_rst"
-elif is_test("testbenches/uvm_driver_sequencer_env.sv"):
-  kind = "dut_interface_echo"
-elif is_test("support/uvm_hdl_selftest.sv"):
-  kind = "uvm_hdl_selftest"
+raw_kind = os.environ.get("ARCILATOR_DRIVER_KIND", "").strip().lower()
+kind = raw_kind or "auto"
+kind_is_auto = (kind == "auto")
+if kind in ("none", "off", "0", "false", "no"):
+  kind = "default"
+  kind_is_auto = False
+if kind == "auto":
+  kind = "default"
+  if is_test("chapter-16/16.2--assert0-uvm.sv") or is_test("chapter-16/16.2--assert-final-uvm.sv"):
+    kind = "inverter_assert"
+  elif is_test("chapter-16/16.2--assert-uvm.sv") or is_test("chapter-16/16.2--assume-uvm.sv"):
+    kind = "adder_check"
+  elif (
+    is_test("chapter-16/16.7--sequence-uvm.sv")
+    or is_test("chapter-16/16.12--property-prec-uvm.sv")
+    or is_test("chapter-16/16.12--property-interface-prec-uvm.sv")
+    or is_test("chapter-16/16.17--expect-uvm.sv")
+  ):
+    kind = "mem_ctrl_seq"
+  elif (
+    is_test("chapter-16/16.12--property-uvm.sv")
+    or is_test("chapter-16/16.12--property-interface-uvm.sv")
+    or is_test("chapter-16/16.14--assume-property-uvm.sv")
+  ):
+    kind = "mem_ctrl_no_both"
+  elif is_test("chapter-16/16.7--sequence-and-uvm.sv") or is_test("chapter-16/16.7--sequence-and-range-uvm.sv"):
+    kind = "mod_gnts_with_gnt2"
+  elif is_test("chapter-16/16.7--sequence-or-uvm.sv") or is_test("chapter-16/16.7--sequence-intersect-uvm.sv"):
+    kind = "mod_gnts"
+  elif is_test("chapter-16/16.7--sequence-throughout-uvm.sv"):
+    kind = "mod_throughout"
+  elif is_test("chapter-16/16.9--sequence-stable-uvm.sv") or is_test("chapter-16/16.9--sequence-fell-uvm.sv"):
+    kind = "clk_gen_out_final0"
+  elif (
+    is_test("chapter-16/16.9--sequence-changed-uvm.sv")
+    or is_test("chapter-16/16.9--sequence-rose-uvm.sv")
+    or is_test("chapter-16/16.9--sequence-past-uvm.sv")
+  ):
+    kind = "clk_gen_out_final1"
+  elif (
+    is_test("chapter-16/16.10--sequence-local-var-uvm.sv")
+    or is_test("chapter-16/16.10--property-local-var-uvm.sv")
+    or is_test("chapter-16/16.11--sequence-subroutine-uvm.sv")
+  ):
+    kind = "clk_gen_pipe_valid"
+  elif is_test("chapter-16/16.13--sequence-multiclock-uvm.sv"):
+    kind = "multiclock"
+  elif is_test("chapter-16/16.15--property-iff-uvm.sv") or is_test("chapter-16/16.15--property-iff-uvm-fail.sv"):
+    kind = "iff_rst"
+  elif is_test("testbenches/uvm_driver_sequencer_env.sv"):
+    kind = "dut_interface_echo"
+  elif is_test("support/uvm_hdl_selftest.sv"):
+    kind = "uvm_hdl_selftest"
 
 drive_lines: list[str] = []
 preamble_lines: list[str] = []
+post_eval_lines: list[str] = []
 loop_checks: list[str] = []
 final_checks: list[str] = []
 if enable_checks:
@@ -1300,12 +1362,12 @@ if kind == "inverter_assert":
     "    // inverter_assert: drive a=8'h35 (matches UVM body).",
   ] + set_state("a", "0x35u")
   if enable_checks:
-    b_st, b_bits, b_nbytes = get_u64("b")
+    b_st, b_bits, b_nbytes, b_off = get_u64("b")
     if b_st and b_nbytes and b_nbytes <= 8:
       final_checks += [
         "  // inverter_assert: check b != a (matches UVM assert).",
         "  {",
-        f"    const uint64_t b_val = load_u64({int(b_st.get('offset', 0))}, {b_nbytes}) & 0xFFu;",
+        f"    const uint64_t b_val = load_u64({b_off}, {b_nbytes}) & 0xFFu;",
         "    if (b_val == 0x35u) {",
         "      std::cerr << \"assert failed :assert: (False)\" << \"\\n\";",
         "      return 1;",
@@ -1313,17 +1375,59 @@ if kind == "inverter_assert":
         "  }",
       ]
 elif kind == "adder_check":
-  drive_lines += [
-    "    // adder_check: drive a=8'h35, b=8'h79, toggle clk.",
-  ] + set_state("a", "0x35u") + set_state("b", "0x79u") + set_state("clk", "(t & 1u)")
+  # Top-executed UVM benches drive `a`/`b` via interface signals that are often
+  # lowered into the internal `__arcilator_sig_*` database rather than directly
+  # into `dut.view.state` bytes. Drive them by patching the packed sig value,
+  # and do so *after* the first posedge of clk to match the testbench's
+  # `@(m_if.clk); m_if.a <= ...; m_if.b <= ...;` (NBA after the edge).
+  preamble_lines += [
+    "  // adder_check: emulate UVM interface drive after first posedge.",
+    "  bool adder_check_ab_set = false;",
+    "  uint8_t adder_check_prev_clk = 0;",
+    "",
+  ]
+  post_eval_lines += [
+    "    // adder_check: after first posedge, drive a/b like the UVM run_phase.",
+    "    {",
+    "      const uint8_t clk_now = dut.view.internal.dut.clk & 1u;",
+    "      if (!adder_check_ab_set && (adder_check_prev_clk == 0u) && (clk_now == 1u)) {",
+    "        // sig0 layout (from lowering): [0]=clk, [1..8]=a, [9..16]=b, [17..]=c...",
+    "        const uint64_t old_sig = __arcilator_sig_load_u64(/*sigId=*/0u, /*procId=*/0xFFFFFFFFu);",
+    "        const uint64_t mask = (0xFFull << 1) | (0xFFull << 9);",
+    "        const uint64_t new_sig = (old_sig & ~mask) | (0x35ull << 1) | (0x79ull << 9);",
+    "        __arcilator_sig_store_u64(/*sigId=*/0u, new_sig, /*procId=*/0xFFFFFFFFu);",
+    "        __arcilator_sig_commit();",
+    "        // Settle without advancing time (delta/NBA equivalent).",
+    "        for (uint32_t delta2 = 0; delta2 < delta_limit; ++delta2) {",
+    "          dut.eval();",
+    "          const bool changed2 = __arcilator_sig_commit();",
+  ]
+  if enable_uvm_hdl:
+    post_eval_lines += [
+      "          arcilator_apply_forces();",
+    ]
+  post_eval_lines += [
+    "          if (!changed2 && delta2 > 0) break;",
+    "        }",
+  ]
+  if enable_uvm_hdl:
+    post_eval_lines += [
+      "        arcilator_apply_forces();",
+    ]
+  post_eval_lines += [
+    "        adder_check_ab_set = true;",
+    "      }",
+    "      adder_check_prev_clk = clk_now;",
+    "    }",
+  ]
   if enable_checks:
-    c_st, c_bits, c_nbytes = get_u64("c")
+    c_st, c_bits, c_nbytes, c_off = get_u64("c")
     if c_st and c_nbytes and c_nbytes <= 8:
       mask = (1 << min(c_bits, 63)) - 1 if c_bits < 64 else 0xFFFFFFFFFFFFFFFF
       final_checks += [
         "  // adder_check: check c == a + b (matches UVM assert/assume).",
         "  {",
-        f"    const uint64_t c_val = load_u64({int(c_st.get('offset', 0))}, {c_nbytes}) & {mask}ull;",
+        f"    const uint64_t c_val = load_u64({c_off}, {c_nbytes}) & {mask}ull;",
         "    const uint64_t expect = 0x35u + 0x79u;",
         "    if (c_val != expect) {",
         "      std::cerr << \"c(\" << c_val << \") != a + b(\" << expect << \") :assert: (False)\" << \"\\n\";",
@@ -1449,12 +1553,12 @@ elif kind == "clk_gen_out_final0" or kind == "clk_gen_out_final1":
     "    // clk_gen: just toggle clk.",
   ] + set_state("clk", "(t & 1u)")
   if enable_checks:
-    out_st, out_bits, out_nbytes = get_u64("out")
+    out_st, out_bits, out_nbytes, out_off = get_u64("out")
     if out_st and out_nbytes and out_nbytes <= 8:
       expect = "0u" if kind == "clk_gen_out_final0" else "1u"
       final_checks += [
         "  // [assert] clk_gen: check final out value.",
-        f"  if ((load_u64({int(out_st.get('offset', 0))}, {out_nbytes}) & 1u) != {expect}) {{",
+        f"  if ((load_u64({out_off}, {out_nbytes}) & 1u) != {expect}) {{",
         "    std::cerr << \"seq failed :assert: (False)\" << \"\\n\";",
         "    return 1;",
         "  }",
@@ -1557,7 +1661,7 @@ elif kind == "dut_interface_echo" and "in" in in_bits and in_bits.get("in", 0) <
   drive_lines += [
     "    {",
     "      uint64_t in_packed = static_cast<uint64_t>(kPattern) | (static_cast<uint64_t>(clk) << 8);",
-    f"      std::memcpy(dut.view.state + {int(port_by_name['in']['offset'])}, &in_packed, {in_nbytes});",
+    f"      std::memcpy(dut.view.state + {value_byte_offset(port_by_name['in'])}, &in_packed, {in_nbytes});",
     "    }",
   ]
 
@@ -1567,10 +1671,10 @@ elif kind == "dut_interface_echo" and "in" in in_bits and in_bits.get("in", 0) <
       "    // Keep output_if.clk in sync without clobbering output_if.data.",
       "    {",
       "      uint64_t out_cur = 0;",
-      f"      std::memcpy(&out_cur, dut.view.state + {int(port_by_name['out']['offset'])}, {out_nbytes});",
+      f"      std::memcpy(&out_cur, dut.view.state + {value_byte_offset(port_by_name['out'])}, {out_nbytes});",
       "      uint64_t out_packed = out_cur;",
       "      out_packed = (out_packed & 0xFFu) | (static_cast<uint64_t>(clk) << 8);",
-      f"      std::memcpy(dut.view.state + {int(port_by_name['out']['offset'])}, &out_packed, {out_nbytes});",
+      f"      std::memcpy(dut.view.state + {value_byte_offset(port_by_name['out'])}, &out_packed, {out_nbytes});",
       "    }",
     ]
 else:
@@ -1582,7 +1686,7 @@ else:
   # When that happens, try to drive internal clocks/resets by name so
   # concurrent assertions don't become vacuous.
   internal_drives: list[tuple[dict, str]] = []
-  if not in_bits and ("uvm" in tags):
+  if not in_bits and ("uvm" in tags) and kind_is_auto:
     for st in internal_states:
       name = st.get("name") or ""
       leaf = name.split("/")[-1]
@@ -1624,9 +1728,7 @@ else:
     drive_lines += ["    // [uvm-top] drive internal clocks/resets"]
     for st, expr in internal_drives:
       name = st.get("name") or "internal"
-      drive_lines += [f"    // internal: {name}"] + set_offset(
-        int(st.get("offset", 0)), int(st.get("numBits", 0)), expr, label=name
-      )
+      drive_lines += [f"    // internal: {name}"] + set_state_dict(st, expr, label=name)
 
 lines: list[str] = []
 lines += [
@@ -1683,6 +1785,7 @@ lines += [
 lines += [
   "static uint64_t g_arcilator_now_fs = 0;",
   "static std::vector<uint32_t> g_arcilator_proc_pc;",
+  "static std::vector<std::vector<uint64_t>> g_arcilator_proc_frame;",
   "struct ArcilatorDelayWait { bool active = false; uint64_t targetFs = 0; };",
   "struct ArcilatorChangeWait { bool active = false; uint64_t lastSig = 0; };",
   "static std::vector<ArcilatorDelayWait> g_arcilator_delay_waits;",
@@ -1696,6 +1799,13 @@ lines += [
   "",
   "static void ensure_proc_state(uint32_t procId) {",
   "  if (g_arcilator_proc_pc.size() <= procId) g_arcilator_proc_pc.resize(procId + 1u, 0u);",
+  "}",
+  "",
+  "static void ensure_proc_frame(uint32_t procId, uint32_t slot) {",
+  "  ensure_proc_state(procId);",
+  "  if (g_arcilator_proc_frame.size() <= procId) g_arcilator_proc_frame.resize(procId + 1u);",
+  "  if (g_arcilator_proc_frame[procId].size() <= slot)",
+  "    g_arcilator_proc_frame[procId].resize(static_cast<size_t>(slot) + 1u, 0ull);",
   "}",
   "",
   "static void ensure_wait_state(uint32_t waitId) {",
@@ -1733,6 +1843,16 @@ lines += [
   "extern \"C\" void __arcilator_set_pc(uint32_t procId, uint32_t pc) {",
   "  ensure_proc_state(procId);",
   "  g_arcilator_proc_pc[procId] = pc;",
+  "}",
+  "",
+  "extern \"C\" uint64_t __arcilator_frame_load_u64(uint32_t procId, uint32_t slot) {",
+  "  ensure_proc_frame(procId, slot);",
+  "  return g_arcilator_proc_frame[procId][slot];",
+  "}",
+  "",
+  "extern \"C\" void __arcilator_frame_store_u64(uint32_t procId, uint32_t slot, uint64_t value) {",
+  "  ensure_proc_frame(procId, slot);",
+  "  g_arcilator_proc_frame[procId][slot] = value;",
   "}",
   "",
   "extern \"C\" bool __arcilator_wait_delay(uint32_t waitId, uint64_t delayFs) {",
@@ -1792,15 +1912,21 @@ lines += [
   "  }",
   "}",
   "",
-  "extern \"C\" void __arcilator_sig_commit() {",
+  "extern \"C\" bool __arcilator_sig_commit() {",
+  "  bool changed = false;",
   "  for (uint32_t sigId : g_arcilator_sig_dirty) {",
-  "    if (sigId < g_arcilator_sig_cur.size()) g_arcilator_sig_cur[sigId] = g_arcilator_sig_next[sigId];",
+  "    if (sigId < g_arcilator_sig_cur.size()) {",
+  "      const uint64_t next = g_arcilator_sig_next[sigId];",
+  "      if (g_arcilator_sig_cur[sigId] != next) changed = true;",
+  "      g_arcilator_sig_cur[sigId] = next;",
+  "    }",
   "    if (sigId < g_arcilator_sig_dirty_flag.size()) g_arcilator_sig_dirty_flag[sigId] = 0u;",
   "  }",
   "  g_arcilator_sig_dirty.clear();",
   "  for (size_t p = 0; p < g_arcilator_sig_local_valid.size(); ++p) {",
   "    for (size_t s = 0; s < g_arcilator_sig_local_valid[p].size(); ++s) g_arcilator_sig_local_valid[p][s] = 0u;",
   "  }",
+  "  return changed;",
   "}",
   "",
 ]
@@ -1817,7 +1943,7 @@ if enable_uvm_hdl:
     bits = int(st.get("numBits", 0))
     if bits <= 0:
       continue
-    off = int(st.get("offset", 0))
+    off = value_byte_offset(st)
     stride = int(st.get("stride", 0))
     depth = int(st.get("depth", 0))
     hdl_entries.append(
@@ -2365,8 +2491,10 @@ lines += [
   f"  constexpr uint64_t kResetSteps = {reset_cycles};",
   f"  constexpr uint64_t kSeed = {seed}ull;",
   f"  constexpr uint64_t kVcdDt = {vcd_dt}ull;",
-  "  const uint64_t dt_fs_env = parse_u64_env(\"ARCILATOR_SIM_DT_FS\", 1000000ull);",
+  "  const uint64_t dt_fs_env = parse_u64_env(\"ARCILATOR_SIM_DT_FS\", kVcdDt * 1000000ull);",
   "  const uint64_t dt_fs = dt_fs_env ? dt_fs_env : 1ull;",
+  "  const uint64_t delta_limit_env = parse_u64_env(\"ARCILATOR_DELTA_LIMIT\", 32ull);",
+  "  const uint32_t delta_limit = delta_limit_env ? static_cast<uint32_t>(delta_limit_env) : 1u;",
   "  g_arcilator_now_fs = 0;",
   "  const uint64_t trace_start = parse_u64_env(\"ARCILATOR_TRACE_START\", 0);",
   "  const uint64_t trace_cycles = parse_u64_env(\"ARCILATOR_TRACE_CYCLES\", kSteps);",
@@ -2389,7 +2517,6 @@ lines += [
   "  const char* vcd_path = (argc > 1) ? argv[1] : \"wave.vcd\";",
   "  std::ofstream vcd(vcd_path);",
   "  if (!vcd) { std::cerr << \"failed to open VCD output: \" << vcd_path << \"\\n\"; return 1; }",
-  "  auto vcd_writer = dut.vcd(vcd);",
   "",
 ]
 lines += preamble_lines
@@ -2409,24 +2536,32 @@ if enable_uvm_hdl:
     "",
   ]
 lines += [
-  "  // Step 0: let initial blocks settle.",
-  "  dut.eval();",
-  "  __arcilator_sig_commit();",
+  "  // Step 0: let initial blocks settle (delta cycles).",
+  "  //",
+  "  // Note: some LLHD/SV constructs schedule work for the *next* delta cycle",
+  "  // even if no visible signal changed in the current one. Run at least two",
+  "  // delta iterations before early-exiting so time-0 initialization settles.",
+  "  for (uint32_t delta = 0; delta < delta_limit; ++delta) {",
+  "    dut.eval();",
+  "    const bool changed = __arcilator_sig_commit();",
+]
+if enable_uvm_hdl:
+  lines += [
+    "    arcilator_apply_forces();",
+  ]
+lines += [
+  "    if (!changed && delta > 0) break;",
+  "  }",
 ]
 if enable_uvm_hdl:
   lines += [
     "  arcilator_apply_forces();",
   ]
 lines += [
-  "  sim_time += 1;",
-  "  {",
-  "    const bool trace = (trace_cycles != 0) && (trace_start == 0);",
-  "    if (trace) {",
-  "      if (!prev_trace) vcd_writer.time = sim_time - 1;",
-  "      vcd_writer.writeTimestep(1);",
-  "    }",
-  "    prev_trace = trace;",
-  "  }",
+  "",
+  "  // Create the VCD writer after initial evaluation so $dumpvars reflects",
+  "  // the time-0 settled state (more comparable to Verilator tracing).",
+  "  auto vcd_writer = dut.vcd(vcd);",
   "",
   "  for (uint64_t t = 0; t < kSteps; ++t) {",
 ]
@@ -2438,13 +2573,23 @@ if enable_uvm_hdl:
   ]
 lines += [
   "    if (g_arcilator_now_fs > (~0ull - dt_fs)) g_arcilator_now_fs = ~0ull; else g_arcilator_now_fs += dt_fs;",
-  "    dut.eval();",
-  "    __arcilator_sig_commit();",
+  "    for (uint32_t delta = 0; delta < delta_limit; ++delta) {",
+  "      dut.eval();",
+  "      const bool changed = __arcilator_sig_commit();",
+]
+if enable_uvm_hdl:
+  lines += [
+    "      arcilator_apply_forces();",
+  ]
+lines += [
+  "      if (!changed && delta > 0) break;",
+  "    }",
 ]
 if enable_uvm_hdl:
   lines += [
     "    arcilator_apply_forces();",
   ]
+lines += post_eval_lines
 lines += [
   "    sim_time += kVcdDt;",
   "    const bool trace = (trace_cycles != 0) && (t >= trace_start) && (t < trace_end);",
@@ -2460,6 +2605,16 @@ lines += [
 ]
 lines += final_checks
 lines += [
+  "",
+  "  // Execute final blocks and flush one last VCD timestep so end-of-sim",
+  "  // state is visible in waveforms (e.g. UVM M0 summary signals).",
+  "  dut.final();",
+  "  __arcilator_sig_commit();",
+  "  const bool trace_final = (trace_cycles != 0) && (kSteps >= trace_start) && (kSteps <= trace_end);",
+  "  if (trace_final) {",
+  "    if (!prev_trace) vcd_writer.time = sim_time;",
+  "    vcd_writer.writeTimestep(0);",
+  "  }",
   "  return 0;",
   "}",
 ]
