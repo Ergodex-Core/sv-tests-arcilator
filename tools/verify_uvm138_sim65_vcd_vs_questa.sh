@@ -10,6 +10,6 @@ OUT_DIR="${OUT_DIR:-"${SVTESTS_DIR}/out_arcilator_vcd_vs_questa_uvm138_sim65"}"
 exec "${SVTESTS_DIR}/tools/verify_questa_vcd_set.sh" \
   --list "${LIST_PATH}" \
   --gold-root "${GOLD_ROOT}" \
+  --arcilator-vcd-dt 1 \
   --out "${OUT_DIR}" \
   "$@"
-
