@@ -134,6 +134,23 @@ if ! [[ "${MULTIPLIER}" =~ ^[0-9]+$ ]] || [[ "${MULTIPLIER}" -lt 1 ]]; then
   exit 2
 fi
 
+if [[ -n "${QUESTA_BIN_DIR:-}" ]]; then
+  export PATH="${QUESTA_BIN_DIR}:${PATH}"
+else
+  workspace_dir="$(cd "${SVTESTS_DIR}/.." && pwd)"
+  maybe_bin="${workspace_dir}/questa/questa_fse/linux_x86_64"
+  if [[ -d "${maybe_bin}" ]]; then
+    export PATH="${maybe_bin}:${PATH}"
+  fi
+fi
+
+if [[ -z "${SALT_LICENSE_SERVER:-}" ]]; then
+  maybe_license="${workspace_dir:-"$(cd "${SVTESTS_DIR}/.." && pwd)"}/LR-277765_License.dat"
+  if [[ -f "${maybe_license}" ]]; then
+    export SALT_LICENSE_SERVER="${maybe_license}"
+  fi
+fi
+
 for tool in vlog vsim vlib; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "[error] required Questa tool not found in PATH: ${tool}" >&2
@@ -195,13 +212,14 @@ export THIRD_PARTY_DIR="${SVTESTS_DIR}/third_party"
 export GENERATORS_DIR="${SVTESTS_DIR}/generators"
 export OVERRIDE_TEST_TIMEOUTS="${OVERRIDE_TEST_TIMEOUTS:-1800}"
 
-export QUESTA_ARTIFACTS="always"
+export QUESTA_ARTIFACTS="vcd"
 export QUESTA_ARTIFACT_ROOT="${OUT_GOLD_ROOT}"
 
 runner_param="--quiet"
 if [[ "${KEEP_TMP}" != "0" && "${KEEP_TMP}" != "false" && "${KEEP_TMP}" != "no" && "${KEEP_TMP}" != "off" ]]; then
   runner_param="--keep-tmp"
 fi
+export SVTESTS_DIR runner_param
 
 python3 - "${tmp_tests_file}" "${BASE_GOLD_ROOT}" "${MIN_ENDTIME}" "${MULTIPLIER}" >"${tmp_run_file}" <<'PY'
 import sys

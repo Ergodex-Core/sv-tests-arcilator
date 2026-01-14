@@ -174,16 +174,18 @@ class Questa_vcd(BaseRunner):
         onfail_only = artifacts_mode in ("onfail", "fail", "failure")
         if onfail_only and rc == 0:
             return
+        vcd_only = artifacts_mode in ("vcd", "vcdonly", "wave", "waveonly")
 
         os.makedirs(self._artifact_dir, exist_ok=True)
 
-        compile_log = os.path.join(tmp_dir, "compile.log")
-        if os.path.exists(compile_log):
-            shutil.copy2(compile_log, os.path.join(self._artifact_dir, "compile.log"))
+        if not vcd_only:
+            compile_log = os.path.join(tmp_dir, "compile.log")
+            if os.path.exists(compile_log):
+                shutil.copy2(compile_log, os.path.join(self._artifact_dir, "compile.log"))
 
-        run_log = os.path.join(tmp_dir, "run.log")
-        if os.path.exists(run_log):
-            shutil.copy2(run_log, os.path.join(self._artifact_dir, "run.log"))
+            run_log = os.path.join(tmp_dir, "run.log")
+            if os.path.exists(run_log):
+                shutil.copy2(run_log, os.path.join(self._artifact_dir, "run.log"))
 
         if self._tmp_vcd_path and os.path.exists(self._tmp_vcd_path):
             shutil.copy2(self._tmp_vcd_path, os.path.join(self._artifact_dir, "wave.vcd"))

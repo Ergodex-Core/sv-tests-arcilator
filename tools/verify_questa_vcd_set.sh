@@ -242,7 +242,6 @@ export OVERRIDE_TEST_TIMEOUTS="${OVERRIDE_TEST_TIMEOUTS:-1800}"
 export ARCILATOR_ARTIFACTS="always"
 export ARCILATOR_VCD_DT
 export ARCILATOR_SIM_DT_FS="$((ARCILATOR_VCD_DT * 1000000))"
-export SVTESTS_UVM_FORCE_RUN_UNTIL="${SVTESTS_UVM_FORCE_RUN_UNTIL:-0}"
 
 runner_param="--quiet"
 if [[ "${KEEP_TMP}" != "0" && "${KEEP_TMP}" != "false" && "${KEEP_TMP}" != "no" && "${KEEP_TMP}" != "off" ]]; then

@@ -316,6 +316,8 @@ if uvm_testbench and force_run_until is not None:
                 d.startswith("SVTESTS_UVM_BIND_MODULE=")
                 for d in test_params['defines']):
             test_params['defines'].append(f"SVTESTS_UVM_BIND_MODULE={top_for_bind}")
+        if runner_obj.name.startswith("arcilator") and "UVM_ENABLE_DEPRECATED_API" not in test_params['defines']:
+            test_params['defines'].append("UVM_ENABLE_DEPRECATED_API")
         test_params['defines'].append(
             f"SVTESTS_UVM_FORCE_RUN_UNTIL={max(force_run_until, 0)}")
 

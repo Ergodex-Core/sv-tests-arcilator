@@ -1,0 +1,16 @@
+# UVM138 strict VCD matches vs Questa gold (min_endtime=1000)
+#
+# Gold root:
+#   sv-tests/gold/questa_vcd_uvm138_m27_buildobj4_strict_min1000/<stem>/wave.vcd
+#
+# Verification:
+#   cd sv-tests
+#   GOLD_ROOT=gold/questa_vcd_uvm138_m27_buildobj4_strict_min1000 \
+#   ./tools/verify_uvm138_m27_vcd_vs_questa.sh --workers $(nproc)
+#
+chapter-16/16.10--property-local-var-uvm.sv
+chapter-16/16.10--sequence-local-var-uvm.sv
+chapter-16/16.11--sequence-subroutine-uvm.sv
+chapter-16/16.13--sequence-multiclock-uvm.sv
+chapter-16/16.9--sequence-stable-uvm.sv
+
