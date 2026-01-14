@@ -61,6 +61,18 @@ def _is_truthy_env(name: str, default: str = "0") -> bool:
     return str(val).strip().lower() not in ("", "0", "false", "no", "off")
 
 
+def _get_int_env(name: str):
+    if name not in os.environ:
+        return None
+    raw = str(os.environ.get(name, "")).strip()
+    if raw == "":
+        return None
+    try:
+        return int(raw, 0)
+    except ValueError:
+        return None
+
+
 def _looks_like_uvm_testbench(files) -> bool:
     # Heuristic to distinguish "real UVM testbench" sources (class-based TB
     # that executes) from incidental `:tags: uvm` uses (e.g. uvm_hdl_* selftests).
@@ -258,13 +270,18 @@ for key in libs.keys():
 
 test_params['defines'] = test_params['defines'].split()
 
+# UVM testbench detection (for UVM-specific helpers).
+uvm_testbench = (
+    test_params['mode'] == "simulation"
+    and "uvm" in test_params.get("tags", "")
+    and _looks_like_uvm_testbench(user_files_for_uvm_m0)
+)
+
 # UVM M0: inject an end-of-sim UVM report check for real UVM testbenches.
 # Defaults to on; disable with SVTESTS_UVM_M0=0.
 uvm_m0_enabled = (
-    test_params['mode'] == "simulation"
-    and "uvm" in test_params.get("tags", "")
+    uvm_testbench
     and _is_truthy_env("SVTESTS_UVM_M0", default="1")
-    and _looks_like_uvm_testbench(user_files_for_uvm_m0)
     # For arcilator runs, require an explicit opt-out (SVTESTS_UVM_M0_ARCILATOR=0)
     # rather than an opt-in. UVM-tagged "PASS" results are meaningless if the
     # testbench does not actually execute.
@@ -277,6 +294,30 @@ if uvm_m0_enabled:
     test_params['files'].append(wrapper)
     top_for_bind = test_params.get("top_module") or "top"
     test_params['defines'].append(f"SVTESTS_UVM_BIND_MODULE={top_for_bind}")
+
+# UVM run-control: disable UVM's default "$finish when phases are done" behavior,
+# and optionally force the testbench to run until an absolute time (in the test's
+# time units). This is primarily used to generate longer gold VCDs for parity.
+force_run_until = _get_int_env("SVTESTS_UVM_FORCE_RUN_UNTIL")
+if uvm_testbench and force_run_until is not None:
+    # A zero/negative value disables finish_on_completion but does not force an
+    # alternate $finish. This is safe for arcilator's cycle-bounded driver, but
+    # may hang other simulators that rely on $finish to terminate.
+    if force_run_until <= 0 and not runner_obj.name.startswith("arcilator"):
+        logger.warning(
+            "SVTESTS_UVM_FORCE_RUN_UNTIL<=0 is only supported for arcilator runners; ignoring"
+        )
+    else:
+        wrapper = os.path.abspath(
+            os.path.join(dirs['tests'], "support", "svtests_uvm_run_control.sv"))
+        test_params['files'].append(wrapper)
+        top_for_bind = test_params.get("top_module") or "top"
+        if not any(
+                d.startswith("SVTESTS_UVM_BIND_MODULE=")
+                for d in test_params['defines']):
+            test_params['defines'].append(f"SVTESTS_UVM_BIND_MODULE={top_for_bind}")
+        test_params['defines'].append(
+            f"SVTESTS_UVM_FORCE_RUN_UNTIL={max(force_run_until, 0)}")
 
 # Filter test files based on what the runner claims to support.
 filtered_files = []
