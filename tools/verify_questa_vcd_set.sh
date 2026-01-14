@@ -16,6 +16,7 @@ This script never runs Questa.
 Options:
   --list PATH         File with sv-tests test paths (required)
   --gold-root PATH    Root directory containing <stem>/wave.vcd (required)
+  --arcilator-vcd-dt N  Set ARCILATOR_VCD_DT (default: 1)
   --runner RUNNER     sv-tests runner key (default: arcilator_top)
   --top1 PATH         Instance prefix in gold VCD (default: top)
   --top2 PATH         Instance prefix in arcilator VCD (default: top.internal)
@@ -36,6 +37,7 @@ GOLD_ROOT=""
 RUNNER_KEY="${RUNNER_KEY:-arcilator_top}"
 TOP1="${TOP1:-top}"
 TOP2="${TOP2:-top.internal}"
+ARCILATOR_VCD_DT="${ARCILATOR_VCD_DT:-1}"
 OUT_DIR=""
 WORKERS="${WORKERS:-"$(nproc)"}"
 KEEP_TMP="${KEEP_TMP:-0}"
@@ -59,6 +61,10 @@ while [[ ${#} -gt 0 ]]; do
       ;;
     --gold-root)
       GOLD_ROOT="${2:-}"
+      shift 2
+      ;;
+    --arcilator-vcd-dt)
+      ARCILATOR_VCD_DT="${2:-}"
       shift 2
       ;;
     --runner)
@@ -125,6 +131,10 @@ if [[ ! -d "${GOLD_ROOT}" ]]; then
   echo "[error] missing gold root dir: ${GOLD_ROOT}" >&2
   exit 2
 fi
+if ! [[ "${ARCILATOR_VCD_DT}" =~ ^[0-9]+$ ]] || [[ "${ARCILATOR_VCD_DT}" -le 0 ]]; then
+  echo "[error] invalid --arcilator-vcd-dt (expected positive integer): ${ARCILATOR_VCD_DT}" >&2
+  exit 2
+fi
 
 sanitize_stem() {
   python3 - "$1" <<'PY'
@@ -182,7 +192,8 @@ if [[ ! -d "${SVTESTS_DIR}/tests/generated" && "${AUTO_GENERATE}" != "0" && "${A
 fi
 
 tmp_tests_file="$(mktemp)"
-cleanup() { rm -f "${tmp_tests_file}"; }
+tmp_run_file="$(mktemp)"
+cleanup() { rm -f "${tmp_tests_file}" "${tmp_run_file}"; }
 trap cleanup EXIT
 
 TESTS_DIR="${SVTESTS_DIR}/tests" LIST_PATH="${LIST_PATH}" python3 - >"${tmp_tests_file}" <<'PY'
@@ -213,6 +224,7 @@ PY
 num_tests="$(wc -l <"${tmp_tests_file}" | tr -d '[:space:]')"
 echo "[list] ${LIST_PATH}"
 echo "[gold] ${GOLD_ROOT}"
+echo "[arcilator] vcd_dt=${ARCILATOR_VCD_DT}"
 echo "[run] runner=${RUNNER_KEY} tests=${num_tests} workers=${WORKERS}"
 echo "[out] ${OUT_DIR}"
 
@@ -228,6 +240,8 @@ export GENERATORS_DIR="${SVTESTS_DIR}/generators"
 export OVERRIDE_TEST_TIMEOUTS="${OVERRIDE_TEST_TIMEOUTS:-1800}"
 
 export ARCILATOR_ARTIFACTS="always"
+export ARCILATOR_VCD_DT
+export ARCILATOR_SIM_DT_FS="$((ARCILATOR_VCD_DT * 1000000))"
 
 runner_param="--quiet"
 if [[ "${KEEP_TMP}" != "0" && "${KEEP_TMP}" != "false" && "${KEEP_TMP}" != "no" && "${KEEP_TMP}" != "off" ]]; then
@@ -236,18 +250,61 @@ fi
 
 export RUNNER_KEY SVTESTS_DIR runner_param
 
+# Pre-compute per-test ARCILATOR_CYCLES from the stored gold VCD length.
+python3 - "${tmp_tests_file}" "${GOLD_ROOT}" "${ARCILATOR_VCD_DT}" >"${tmp_run_file}" <<'PY'
+import sys
+from pathlib import Path
+
+tests_file = Path(sys.argv[1])
+gold_root = Path(sys.argv[2])
+dt = int(sys.argv[3])
+
+def last_change_timestamp(vcd: Path) -> int:
+    cur_t = 0
+    last_change_t = 0
+    with vcd.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if not line:
+                continue
+            if line.startswith("#"):
+                try:
+                    cur_t = int(line[1:].strip() or "0")
+                except ValueError:
+                    continue
+                continue
+            if line.startswith("$"):
+                continue
+            if line[:1] and line[0] in "01xXzZbBrRsS":
+                last_change_t = cur_t
+    return last_change_t
+
+for raw in tests_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+    test_rel = raw.strip()
+    if not test_rel:
+        continue
+    stem = test_rel.replace("/", "__")
+    vcd = gold_root / stem / "wave.vcd"
+    cycles = 1
+    if vcd.is_file():
+        last = last_change_timestamp(vcd)
+        cycles = max((last + dt - 1) // dt, 1)
+    print(f"{cycles}\t{test_rel}")
+PY
+cp -f "${tmp_run_file}" "${OUT_DIR}/arcilator_cycles.tsv"
+
 skip_run_truthy=0
 if [[ "${SKIP_RUN}" != "0" && "${SKIP_RUN}" != "false" && "${SKIP_RUN}" != "no" && "${SKIP_RUN}" != "off" && "${SKIP_RUN}" != "" ]]; then
   skip_run_truthy=1
 fi
 
 if [[ "${skip_run_truthy}" -eq 0 ]]; then
-  cat "${tmp_tests_file}" | xargs -P "${WORKERS}" -n 1 bash -lc '
+  cat "${tmp_run_file}" | xargs -P "${WORKERS}" -n 2 bash -lc '
 set -euo pipefail
-t="$1"
+cycles="$1"
+t="$2"
 out="${OUT_DIR}/logs/${RUNNER_KEY}/${t}.log"
 mkdir -p "$(dirname "${out}")"
-"${SVTESTS_DIR}/tools/runner" --runner "${RUNNER_KEY}" --test "${t}" --out "${out}" "${runner_param}"
+ARCILATOR_CYCLES="${cycles}" "${SVTESTS_DIR}/tools/runner" --runner "${RUNNER_KEY}" --test "${t}" --out "${out}" "${runner_param}"
 ' _ || true
 
   rev="$(git -C "${SVTESTS_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
