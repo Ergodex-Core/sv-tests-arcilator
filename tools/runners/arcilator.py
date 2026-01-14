@@ -893,6 +893,14 @@ class arcilator(BaseRunner):
                         script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
                         script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
 
+                        # For sv-tests `:type: elaboration` runs, treat success
+                        # as "front-end elaboration succeeded" and stop after
+                        # import. This matches the intent of elaboration-mode
+                        # scoring and avoids requiring the full Arc/LLVM
+                        # pipeline for non-simulation tests.
+                        if mode == "elaboration":
+                            script.write("exit 0\n")
+
                     script.write('echo "[stage] arc pipeline (emit-mlir)"\n')
                     script.write(arc_mlir_cmd + "\n")
                     script.write("arc_mlir_rc=$?\n")
@@ -986,7 +994,11 @@ class arcilator(BaseRunner):
                 script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
                 script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
 
-            if mode in ("preprocessing", "parsing"):
+            # For sv-tests `:type: elaboration` runs, treat success as "front-end
+            # elaboration succeeded" and stop after import. This matches the
+            # intent of elaboration-mode scoring and avoids requiring the full
+            # Arc/LLVM pipeline for non-simulation tests.
+            if mode in ("preprocessing", "parsing", "elaboration"):
                 script.write("exit 0\n")
             else:
                 script.write(f'echo "[stage] arc pipeline (emit-mlir)"\n')
@@ -1066,6 +1078,19 @@ if model is None:
   model = models[0]
 
 model_name = model.get("name", "top")
+sig_inits_by_id: dict[int, int] = {}
+for entry in (model.get("sigInits") or []):
+  if not isinstance(entry, dict):
+    continue
+  try:
+    sig_id = int(entry.get("sigId", 0))
+    init_u64 = int(entry.get("initU64", 0))
+  except Exception:
+    continue
+  if sig_id < 0:
+    continue
+  sig_inits_by_id[sig_id] = init_u64 & ((1 << 64) - 1)
+sig_init_items = sorted(sig_inits_by_id.items())
 states = model.get("states", [])
 inputs = [s for s in states if s.get("type") == "input"]
 in_bits = {s.get("name"): int(s.get("numBits", 0)) for s in inputs if s.get("name")}
@@ -1226,7 +1251,10 @@ def is_test(suffix: str) -> bool:
   return test_path.endswith(suffix)
 
 raw_kind = os.environ.get("ARCILATOR_DRIVER_KIND", "").strip().lower()
-kind = raw_kind or "auto"
+# Default to the plain driver so top-level SV testbenches execute end-to-end.
+# The old "auto" behavior injects per-test stimulus/checks and is only enabled
+# when explicitly requested.
+kind = raw_kind or "default"
 kind_is_auto = (kind == "auto")
 if kind in ("none", "off", "0", "false", "no"):
   kind = "default"
@@ -1816,8 +1844,11 @@ lines += [
   "static void ensure_sig_state(uint32_t sigId) {",
   "  if (g_arcilator_sig_cur.size() <= sigId) {",
   "    const size_t n = static_cast<size_t>(sigId) + 1u;",
-  "    g_arcilator_sig_cur.resize(n, 0ull);",
-  "    g_arcilator_sig_next.resize(n, 0ull);",
+  "    // Initialize signals to X (all-ones) so 4-state values start unknown.",
+  "    // 2-state signals are expected to be driven to known values by the SV",
+  "    // initialization code at time 0.",
+  "    g_arcilator_sig_cur.resize(n, ~0ull);",
+  "    g_arcilator_sig_next.resize(n, ~0ull);",
   "    g_arcilator_sig_dirty_flag.resize(n, 0u);",
   "  }",
   "}",
@@ -1895,6 +1926,18 @@ lines += [
   "    if (sigId < g_arcilator_sig_local_valid[procId].size() && g_arcilator_sig_local_valid[procId][sigId])",
   "      return g_arcilator_sig_local[procId][sigId];",
   "  }",
+  "  // If the signal has been written in the current delta cycle, expose the",
+  "  // pending value to later processes in the same timestep. This preserves",
+  "  // SystemVerilog-style immediate visibility for blocking assignments and",
+  "  // avoids clobbering independent bit-slice updates to packed runtime",
+  "  // signals (e.g. interface field packs).",
+  "  if (sigId < g_arcilator_sig_dirty_flag.size() && g_arcilator_sig_dirty_flag[sigId])",
+  "    return g_arcilator_sig_next[sigId];",
+  "  return g_arcilator_sig_cur[sigId];",
+  "}",
+  "",
+  "extern \"C\" uint64_t __arcilator_sig_read_u64(uint32_t sigId, uint32_t /*procId*/) {",
+  "  ensure_sig_state(sigId);",
   "  return g_arcilator_sig_cur[sigId];",
   "}",
   "",
@@ -1927,6 +1970,25 @@ lines += [
   "    for (size_t s = 0; s < g_arcilator_sig_local_valid[p].size(); ++s) g_arcilator_sig_local_valid[p][s] = 0u;",
   "  }",
   "  return changed;",
+  "}",
+  "",
+]
+
+lines += [
+  "struct ArcilatorSigInit { uint32_t sigId; uint64_t value; };",
+  "static const ArcilatorSigInit kArcilatorSigInits[] = {",
+]
+for sig_id, init_u64 in sig_init_items:
+  lines.append(f"  {{{sig_id}u, {init_u64}ull}},")
+lines += [
+  "};",
+  "",
+  "static void arcilator_seed_sig_inits() {",
+  "  for (const auto &it : kArcilatorSigInits) {",
+  "    ensure_sig_state(it.sigId);",
+  "    g_arcilator_sig_cur[it.sigId] = it.value;",
+  "    g_arcilator_sig_next[it.sigId] = it.value;",
+  "  }",
   "}",
   "",
 ]
@@ -2495,6 +2557,7 @@ lines += [
   "  const uint64_t dt_fs = dt_fs_env ? dt_fs_env : 1ull;",
   "  const uint64_t delta_limit_env = parse_u64_env(\"ARCILATOR_DELTA_LIMIT\", 32ull);",
   "  const uint32_t delta_limit = delta_limit_env ? static_cast<uint32_t>(delta_limit_env) : 1u;",
+  "  const bool stop_on_uvm_done = parse_u64_env(\"ARCILATOR_STOP_ON_UVM_DONE\", 1ull) != 0ull;",
   "  g_arcilator_now_fs = 0;",
   "  const uint64_t trace_start = parse_u64_env(\"ARCILATOR_TRACE_START\", 0);",
   "  const uint64_t trace_cycles = parse_u64_env(\"ARCILATOR_TRACE_CYCLES\", kSteps);",
@@ -2503,6 +2566,7 @@ lines += [
   "  uint64_t sim_time = 0;",
   "  bool prev_trace = false;",
   f"  {model_name} dut;",
+  "  arcilator_seed_sig_inits();",
   "  uint64_t rand_seed = kSeed;",
   "  uint64_t ntb_seed = 0;",
   "  if (parse_plusarg_u64(argc, argv, \"+ntb_random_seed=\", &ntb_seed)) rand_seed = ntb_seed;",
@@ -2600,6 +2664,9 @@ lines += [
   "    prev_trace = trace;",
 ]
 lines += loop_checks
+lines += [
+  "    if (stop_on_uvm_done && circt_uvm_phase_all_done()) break;",
+]
 lines += [
   "  }",
 ]

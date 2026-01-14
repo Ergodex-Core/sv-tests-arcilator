@@ -12,14 +12,14 @@ SVTESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CHIPSALLIANCE_CSV="${CHIPSALLIANCE_CSV:-}"
 if [[ -z "${CHIPSALLIANCE_CSV}" ]]; then
-  if [[ -f "${SVTESTS_DIR}/../chipsalliance.csv" ]]; then
-    CHIPSALLIANCE_CSV="${SVTESTS_DIR}/../chipsalliance.csv"
-  elif [[ -f "${SVTESTS_DIR}/chipsalliance.csv" ]]; then
+  if [[ -f "${SVTESTS_DIR}/chipsalliance.csv" ]]; then
     CHIPSALLIANCE_CSV="${SVTESTS_DIR}/chipsalliance.csv"
+  elif [[ -f "${SVTESTS_DIR}/../chipsalliance.csv" ]]; then
+    CHIPSALLIANCE_CSV="${SVTESTS_DIR}/../chipsalliance.csv"
   fi
 fi
 if [[ ! -f "${CHIPSALLIANCE_CSV}" ]]; then
-  echo "[error] missing CHIPSALLIANCE_CSV (set env var) (tried: ${SVTESTS_DIR}/../chipsalliance.csv, ${SVTESTS_DIR}/chipsalliance.csv)" >&2
+  echo "[error] missing CHIPSALLIANCE_CSV (set env var) (tried: ${SVTESTS_DIR}/chipsalliance.csv, ${SVTESTS_DIR}/../chipsalliance.csv)" >&2
   exit 2
 fi
 
@@ -137,4 +137,3 @@ print(f"[summary] PASS {passed}/{len(rows)}  (csv={path})")
 PY
 
 echo "[ok] done"
-
