@@ -1,0 +1,354 @@
+$date
+	Sun Jan 11 06:49:41 2026
+$end
+$version
+	Questa Altera Starter FPGA Edition Version 2025.2
+$end
+$timescale
+	1ns
+$end
+
+$scope begin uvm_pkg $end
+$var parameter 32 ! UVM_HDL_MAX_WIDTH $end
+$var parameter 32 " UVM_STREAMBITS $end
+$var parameter 32 # UVM_FIELD_FLAG_RESERVED_BITS $end
+$var parameter 32 $ UVM_RADIX $end
+$var parameter 28 % UVM_RECURSION $end
+$var parameter 28 & UVM_MACRO_NUMFLAGS $end
+$var parameter 28 ' UVM_DEFAULT $end
+$var parameter 28 ( UVM_ALL_ON $end
+$var parameter 28 ) UVM_FLAGS_ON $end
+$var parameter 28 * UVM_FLAGS_OFF $end
+$var parameter 28 + UVM_COPY $end
+$var parameter 28 , UVM_NOCOPY $end
+$var parameter 28 - UVM_COMPARE $end
+$var parameter 28 . UVM_NOCOMPARE $end
+$var parameter 28 / UVM_PRINT $end
+$var parameter 28 0 UVM_NOPRINT $end
+$var parameter 28 1 UVM_RECORD $end
+$var parameter 28 2 UVM_NORECORD $end
+$var parameter 28 3 UVM_PACK $end
+$var parameter 28 4 UVM_NOPACK $end
+$var parameter 28 5 UVM_UNPACK $end
+$var parameter 28 6 UVM_NOUNPACK $end
+$var parameter 28 7 UVM_SET $end
+$var parameter 28 8 UVM_NOSET $end
+$var parameter 28 9 UVM_NODEFPRINT $end
+$var parameter 28 : UVM_MACRO_EXTRAS $end
+$var parameter 28 ; UVM_FLAGS $end
+$var parameter 28 < UVM_CHECK_FIELDS $end
+$var parameter 28 = UVM_END_DATA_EXTRA $end
+$var parameter 28 > UVM_START_FUNCS $end
+$var parameter 28 ? UVM_END_FUNCS $end
+$var parameter 32 @ UVM_STDIN $end
+$var parameter 32 A UVM_STDOUT $end
+$var parameter 32 B UVM_STDERR $end
+$var parameter 32 C UVM_CORE_POST_INIT $end
+$var parameter 32 D UVM_STR_CRC_POLYNOMIAL $end
+$var parameter 32 E UVM_LINE_WIDTH $end
+$var parameter 32 F UVM_NUM_LINES $end
+$var parameter 32 G UVM_SMALL_STRING $end
+$var parameter 32 H UVM_LARGE_STRING $end
+$var integer 32 I m_uvm_core_state $end
+$var integer 32 J uvm_global_random_seed $end
+$var integer 32 K UVM_UNBOUNDED_CONNECTIONS $end
+
+$scope function uvm_hdl_check_path $end
+$var integer 32 L uvm_hdl_check_path $end
+$upscope $end
+
+$scope function uvm_hdl_deposit $end
+$var integer 32 M uvm_hdl_deposit $end
+$var reg 1024 N value [1023:0] $end
+$upscope $end
+
+$scope function uvm_hdl_force $end
+$var integer 32 O uvm_hdl_force $end
+$var reg 1024 P value [1023:0] $end
+$upscope $end
+
+$scope task uvm_hdl_force_time $end
+$var reg 1024 Q value [1023:0] $end
+$var time 64 R force_time $end
+$upscope $end
+
+$scope function uvm_hdl_release $end
+$var integer 32 S uvm_hdl_release $end
+$var reg 1024 T value [1023:0] $end
+$upscope $end
+
+$scope function uvm_hdl_read $end
+$var integer 32 U uvm_hdl_read $end
+$var reg 1024 V value [1023:0] $end
+$upscope $end
+
+$scope function uvm_dpi_get_next_arg $end
+$var integer 32 W init $end
+$upscope $end
+
+$scope function uvm_dpi_regexec $end
+$var integer 32 X uvm_dpi_regexec $end
+$upscope $end
+
+$scope function uvm_re_match $end
+$var integer 32 Y uvm_re_match $end
+$var integer 32 Z e $end
+$var integer 32 [ es $end
+$var integer 32 \ s $end
+$var integer 32 ] ss $end
+$upscope $end
+
+$scope function uvm_radix_to_string $end
+$var reg 28 ^ radix [27:0] $end
+$upscope $end
+
+$scope function uvm_instance_scope $end
+$var reg 8 _ c [7:0] $end
+$var integer 32 ` pos $end
+$upscope $end
+
+$scope function uvm_oneway_hash $end
+$var integer 32 a uvm_oneway_hash $end
+$var integer 32 b seed $end
+$var reg 1 c msb $end
+$var reg 8 d current_byte [7:0] $end
+$var reg 32 e crc1 [31:0] $end
+$upscope $end
+
+$scope function uvm_create_random_seed $end
+$var integer 32 f uvm_create_random_seed $end
+$upscope $end
+
+$scope function uvm_leaf_scope $end
+$var reg 8 g scope_separator [7:0] $end
+$var reg 8 h bracket_match [7:0] $end
+$var integer 32 i pos $end
+$var integer 32 j bmatches $end
+$upscope $end
+
+$scope function uvm_bitstream_to_string $end
+$var reg 4096 k value [4095:0] $end
+$var integer 32 l size $end
+$var reg 28 m radix [27:0] $end
+
+$scope begin #ublk#215181159#252 $end
+$var reg 4096 n _t [4095:0] $end
+$upscope $end
+$upscope $end
+
+$scope function uvm_integral_to_string $end
+$var reg 64 o value [63:0] $end
+$var integer 32 p size $end
+$var reg 28 q radix [27:0] $end
+
+$scope begin #ublk#215181159#284 $end
+$var reg 64 r _t [63:0] $end
+$upscope $end
+$upscope $end
+
+$scope function uvm_get_array_index_int $end
+$var integer 32 s uvm_get_array_index_int $end
+$var reg 1 t is_wildcard $end
+$var integer 32 u i $end
+$upscope $end
+
+$scope function uvm_get_array_index_string $end
+$var reg 1 v is_wildcard $end
+$var integer 32 w i $end
+$upscope $end
+
+$scope function uvm_is_array $end
+$var reg 1 x uvm_is_array $end
+$upscope $end
+
+$scope function uvm_report_enabled $end
+$var integer 32 y uvm_report_enabled $end
+$var integer 32 z verbosity $end
+$var reg 2 { severity [1:0] $end
+$upscope $end
+
+$scope function uvm_report $end
+$var reg 2 | severity [1:0] $end
+$var integer 32 } verbosity $end
+$var integer 32 ~ line $end
+$var reg 1 !! report_enabled_checked $end
+$upscope $end
+
+$scope function m__uvm_report_dpi $end
+$var integer 32 "! severity $end
+$var integer 32 #! verbosity $end
+$var integer 32 $! line $end
+$upscope $end
+
+$scope function uvm_report_info $end
+$var integer 32 %! verbosity $end
+$var integer 32 &! line $end
+$var reg 1 '! report_enabled_checked $end
+$upscope $end
+
+$scope function uvm_report_warning $end
+$var integer 32 (! verbosity $end
+$var integer 32 )! line $end
+$var reg 1 *! report_enabled_checked $end
+$upscope $end
+
+$scope function uvm_report_error $end
+$var integer 32 +! verbosity $end
+$var integer 32 ,! line $end
+$var reg 1 -! report_enabled_checked $end
+$upscope $end
+
+$scope function uvm_report_fatal $end
+$var integer 32 .! verbosity $end
+$var integer 32 /! line $end
+$var reg 1 0! report_enabled_checked $end
+$upscope $end
+
+$scope function uvm_string_to_severity $end
+$var reg 1 1! uvm_string_to_severity $end
+$var reg 2 2! sev [1:0] $end
+$upscope $end
+
+$scope function uvm_is_match $end
+$var reg 1 3! uvm_is_match $end
+$upscope $end
+
+$scope function uvm_string_to_bits $end
+$var reg 115200 4! uvm_string_to_bits [115199:0] $end
+$upscope $end
+
+$scope function get_core_state $end
+$var integer 32 5! get_core_state $end
+$upscope $end
+
+$scope function uvm_bits_to_string $end
+$var reg 115200 6! str [115199:0] $end
+$upscope $end
+
+$scope task uvm_wait_for_nba_region $end
+$var integer 32 7! nba $end
+$var integer 32 8! next_nba $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+$dumpvars
+b0 ^
+0t
+0v
+0x
+01!
+b0 2!
+03!
+bx 4!
+bx 6!
+bx N
+bx P
+bx Q
+bx T
+bx V
+1c
+b1000011 d
+b10110110000101000110011011000001 e
+bx k
+b0 m
+bx n
+bx o
+b0 q
+bx r
+b0 {
+b0 |
+0!!
+0'!
+0*!
+0-!
+00!
+b10000000000 !
+b1000000000000 "
+b11100 #
+b1111000000000000000000000000 $
+b1110000000000000000 %
+b10011 &
+b10101010101 '
+b101010101 (
+b101010101 )
+b0 *
+b1 +
+b10 ,
+b100 -
+b1000 .
+b10000 /
+b100000 0
+b1000000 1
+b10000000 2
+b100000000 3
+b1000000000 4
+b10000000000 5
+b1000000000 6
+b100000000000 7
+b1000000000000 8
+b1000000000000000 9
+b10000000000000000000 :
+b10000000000000000001 ;
+b10000000000000000010 <
+b10000000000000000011 =
+b10000000000000000100 >
+b10000000000000000101 ?
+b10000000000000000000000000000000 @
+b10000000000000000000000000000001 A
+b10000000000000000000000000000010 B
+b11 C
+b100110000010001110110110110 D
+b1111000 E
+b1111000 F
+b1110111111 G
+b11100000111111111 H
+b1 W
+b0 X
+b0 Y
+b0 Z
+b0 [
+b0 \
+b0 ]
+b0 g
+b0 h
+b0 i
+b0 j
+b0 s
+b0 u
+b0 w
+b0 L
+b0 M
+b0 O
+b0 S
+b0 U
+b11 I
+b1100101110011111100110100100110 J
+b101110 _
+b111 `
+b10100100011010011011100001101111 a
+b1100101110011111100110100100110 b
+b10100100011010011011100001101111 f
+b0 l
+b0 p
+b0 y
+b0 z
+b0 }
+b0 ~
+b0 "!
+b0 #!
+b0 $!
+b0 %!
+b0 &!
+b0 (!
+b0 )!
+b0 +!
+b0 ,!
+b0 .!
+b0 /!
+b0 5!
+b0 7!
+b0 8!
+b11111111111111111111111111111111 K
+bx R
+$end
