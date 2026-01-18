@@ -4,8 +4,8 @@ set -euo pipefail
 SVTESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 LIST_PATH="${LIST_PATH:-"${SVTESTS_DIR}/tools/data/uvm138_questa_vcd_matches_buildobj4_strict.txt"}"
-GOLD_ROOT="${GOLD_ROOT:-"${SVTESTS_DIR}/gold/questa_vcd_uvm138_m27_buildobj4_strict"}"
-OUT_DIR="${OUT_DIR:-"${SVTESTS_DIR}/out_arcilator_vcd_vs_questa_uvm138_m27"}"
+GOLD_ROOT="${GOLD_ROOT:-"${SVTESTS_DIR}/gold/questa_vcd_uvm138_m27_buildobj4_strict_min1000_s1"}"
+OUT_DIR="${OUT_DIR:-"${SVTESTS_DIR}/out_arcilator_vcd_vs_questa_uvm138_m27_min1000_s1"}"
 
 exec "${SVTESTS_DIR}/tools/verify_questa_vcd_set.sh" \
   --list "${LIST_PATH}" \

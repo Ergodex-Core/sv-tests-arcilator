@@ -19,6 +19,7 @@ Options:
   --out-gold DIR        Output gold root (<stem>/wave.vcd) (required)
   --base-gold DIR       Existing gold root used to size the new run (default: sv-tests/gold/questa_vcd_uvm138_m0_fixedmarker)
   --min-endtime N       Minimum absolute end time to run to (default: 1000)
+  --endtime-slack N     Add N time units to computed end time (default: 1)
   --multiplier K        Multiply base gold end time by K (default: 1)
   --out OUT_DIR         sv-tests OUT_DIR for logs/tmp (default: out_regen_questa_gold_<list>)
   --workers N           Parallelism (default: 1)
@@ -36,6 +37,7 @@ LIST_PATH=""
 OUT_GOLD_ROOT=""
 BASE_GOLD_ROOT="${BASE_GOLD_ROOT:-"${SVTESTS_DIR}/gold/questa_vcd_uvm138_m0_fixedmarker"}"
 MIN_ENDTIME="${MIN_ENDTIME:-1000}"
+ENDTIME_SLACK="${ENDTIME_SLACK:-1}"
 MULTIPLIER="${MULTIPLIER:-1}"
 OUT_DIR=""
 WORKERS="${WORKERS:-1}"
@@ -67,6 +69,10 @@ while [[ ${#} -gt 0 ]]; do
       ;;
     --min-endtime)
       MIN_ENDTIME="${2:-}"
+      shift 2
+      ;;
+    --endtime-slack)
+      ENDTIME_SLACK="${2:-}"
       shift 2
       ;;
     --multiplier)
@@ -127,6 +133,10 @@ if [[ ! -d "${SVTESTS_DIR}" ]]; then
 fi
 if ! [[ "${MIN_ENDTIME}" =~ ^[0-9]+$ ]] || [[ "${MIN_ENDTIME}" -le 0 ]]; then
   echo "[error] --min-endtime must be a positive integer: ${MIN_ENDTIME}" >&2
+  exit 2
+fi
+if ! [[ "${ENDTIME_SLACK}" =~ ^[0-9]+$ ]]; then
+  echo "[error] --endtime-slack must be a non-negative integer: ${ENDTIME_SLACK}" >&2
   exit 2
 fi
 if ! [[ "${MULTIPLIER}" =~ ^[0-9]+$ ]] || [[ "${MULTIPLIER}" -lt 1 ]]; then
@@ -221,14 +231,15 @@ if [[ "${KEEP_TMP}" != "0" && "${KEEP_TMP}" != "false" && "${KEEP_TMP}" != "no" 
 fi
 export SVTESTS_DIR runner_param
 
-python3 - "${tmp_tests_file}" "${BASE_GOLD_ROOT}" "${MIN_ENDTIME}" "${MULTIPLIER}" >"${tmp_run_file}" <<'PY'
+python3 - "${tmp_tests_file}" "${BASE_GOLD_ROOT}" "${MIN_ENDTIME}" "${ENDTIME_SLACK}" "${MULTIPLIER}" >"${tmp_run_file}" <<'PY'
 import sys
 from pathlib import Path
 
 tests_file = Path(sys.argv[1])
 base_root = Path(sys.argv[2])
 min_end = int(sys.argv[3])
-mult = int(sys.argv[4])
+slack = int(sys.argv[4])
+mult = int(sys.argv[5])
 
 def last_change_timestamp(vcd: Path) -> int:
     cur_t = 0
@@ -256,7 +267,7 @@ for raw in tests_file.read_text(encoding="utf-8", errors="ignore").splitlines():
     stem = test_rel.replace("/", "__")
     vcd = base_root / stem / "wave.vcd"
     base_last = last_change_timestamp(vcd) if vcd.is_file() else 0
-    target = max(min_end, base_last * mult)
+    target = max(min_end, base_last * mult) + slack
     if target <= 0:
         target = min_end
     print(f"{target}\t{test_rel}")

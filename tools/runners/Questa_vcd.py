@@ -98,8 +98,16 @@ class Questa_vcd(BaseRunner):
 
             with open(dofile, "w", encoding="utf-8") as f:
                 f.write("vcd file wave.vcd\n")
-                f.write("vcd add -r /*\n")
+                # Dump only the design hierarchy rooted at the chosen top.
+                # Dumping `/*` also includes packages (e.g. `uvm_pkg`) and can
+                # lead to extremely large headers or truncated VCD output.
+                # Prefer ports-only dumps to avoid capturing dynamic scopes
+                # created by task/function frames during UVM execution (which
+                # can yield truncated headers for some tests).
+                f.write(f"vcd add -r -ports /{top}/*\n")
                 f.write("run -all\n")
+                # Ensure buffered VCD content is written before exit.
+                f.write("vcd flush\n")
                 f.write("quit -f\n")
 
             vsim_cmd = [

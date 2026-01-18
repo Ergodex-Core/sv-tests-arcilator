@@ -29,6 +29,8 @@ Options:
 
 Environment:
   ARCILATOR_ARTIFACTS is forced to "always" for VCD capture.
+  ARCILATOR_STOP_ON_UVM_DONE defaults to 0 to ensure arcilator runs to the
+  requested cycle bound even if UVM phases complete earlier.
 EOF
 }
 
@@ -38,6 +40,7 @@ RUNNER_KEY="${RUNNER_KEY:-arcilator_top}"
 TOP1="${TOP1:-top}"
 TOP2="${TOP2:-top.internal}"
 ARCILATOR_VCD_DT="${ARCILATOR_VCD_DT:-1}"
+ARCILATOR_INVALID_GOLD_CYCLES="${ARCILATOR_INVALID_GOLD_CYCLES:-1000}"
 OUT_DIR=""
 WORKERS="${WORKERS:-"$(nproc)"}"
 KEEP_TMP="${KEEP_TMP:-0}"
@@ -160,7 +163,7 @@ svtests_dir = Path(sys.argv[1])
 test_rel = sys.argv[2]
 test_path = svtests_dir / "tests" / test_rel
 
-meta_re = re.compile(r"^:([a-zA-Z_-]+):\s*(.+)$")
+meta_re = re.compile(r"^\s*:([a-zA-Z_-]+):\s*(.+)$")
 meta = {}
 try:
     for line in test_path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -242,6 +245,7 @@ export OVERRIDE_TEST_TIMEOUTS="${OVERRIDE_TEST_TIMEOUTS:-1800}"
 export ARCILATOR_ARTIFACTS="always"
 export ARCILATOR_VCD_DT
 export ARCILATOR_SIM_DT_FS="$((ARCILATOR_VCD_DT * 1000000))"
+export ARCILATOR_STOP_ON_UVM_DONE="${ARCILATOR_STOP_ON_UVM_DONE:-0}"
 
 runner_param="--quiet"
 if [[ "${KEEP_TMP}" != "0" && "${KEEP_TMP}" != "false" && "${KEEP_TMP}" != "no" && "${KEEP_TMP}" != "off" ]]; then
@@ -251,21 +255,28 @@ fi
 export RUNNER_KEY SVTESTS_DIR runner_param
 
 # Pre-compute per-test ARCILATOR_CYCLES from the stored gold VCD length.
-python3 - "${tmp_tests_file}" "${GOLD_ROOT}" "${ARCILATOR_VCD_DT}" >"${tmp_run_file}" <<'PY'
+python3 - "${tmp_tests_file}" "${GOLD_ROOT}" "${ARCILATOR_VCD_DT}" "${ARCILATOR_INVALID_GOLD_CYCLES}" >"${tmp_run_file}" <<'PY'
 import sys
 from pathlib import Path
 
 tests_file = Path(sys.argv[1])
 gold_root = Path(sys.argv[2])
 dt = int(sys.argv[3])
+fallback_cycles = int(sys.argv[4]) if len(sys.argv) > 4 else 1000
 
-def last_change_timestamp(vcd: Path) -> int:
+def scan_vcd(vcd: Path) -> tuple[str, int]:
     cur_t = 0
     last_change_t = 0
+    saw_enddefinitions = False
+    saw_var = False
     with vcd.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if not line:
                 continue
+            if line.startswith("$var"):
+                saw_var = True
+            if "$enddefinitions" in line:
+                saw_enddefinitions = True
             if line.startswith("#"):
                 try:
                     cur_t = int(line[1:].strip() or "0")
@@ -274,9 +285,13 @@ def last_change_timestamp(vcd: Path) -> int:
                 continue
             if line.startswith("$"):
                 continue
-            if line[:1] and line[0] in "01xXzZbBrRsS":
+            if saw_enddefinitions and line[:1] and line[0] in "01xXzZbBrRsS":
                 last_change_t = cur_t
-    return last_change_t
+    if not saw_var:
+        return ("empty", 0)
+    if not saw_enddefinitions:
+        return ("invalid", 0)
+    return ("valid", last_change_t)
 
 for raw in tests_file.read_text(encoding="utf-8", errors="ignore").splitlines():
     test_rel = raw.strip()
@@ -286,8 +301,13 @@ for raw in tests_file.read_text(encoding="utf-8", errors="ignore").splitlines():
     vcd = gold_root / stem / "wave.vcd"
     cycles = 1
     if vcd.is_file():
-        last = last_change_timestamp(vcd)
-        cycles = max((last + dt - 1) // dt, 1)
+        status, last = scan_vcd(vcd)
+        if status == "valid":
+            cycles = max((last + dt - 1) // dt, 1)
+        elif status == "empty":
+            cycles = 1
+        else:
+            cycles = max(fallback_cycles, 1)
     print(f"{cycles}\t{test_rel}")
 PY
 cp -f "${tmp_run_file}" "${OUT_DIR}/arcilator_cycles.tsv"
@@ -304,7 +324,7 @@ cycles="$1"
 t="$2"
 out="${OUT_DIR}/logs/${RUNNER_KEY}/${t}.log"
 mkdir -p "$(dirname "${out}")"
-ARCILATOR_CYCLES="${cycles}" "${SVTESTS_DIR}/tools/runner" --runner "${RUNNER_KEY}" --test "${t}" --out "${out}" "${runner_param}"
+ARCILATOR_CYCLES="${cycles}" ARCILATOR_TRACE_START=0 ARCILATOR_TRACE_CYCLES="${cycles}" "${SVTESTS_DIR}/tools/runner" --runner "${RUNNER_KEY}" --test "${t}" --out "${out}" "${runner_param}"
 ' _ || true
 
   rev="$(git -C "${SVTESTS_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -325,12 +345,15 @@ no_common=0
 missing_arc=0
 missing_gold=0
 skipped_expected=0
+invalid_gold=0
+empty_gold=0
 
 while IFS= read -r t; do
   stem="$(sanitize_stem "${t}")"
   gold_vcd="${GOLD_ROOT}/${stem}/wave.vcd"
   arc_vcd="${OUT_DIR}/artifacts/arcilator/${stem}/wave.vcd"
   diff_out="${OUT_DIR}/diffs/${stem}.diff"
+  rm -f "${diff_out}" || true
 
   if [[ ! -f "${gold_vcd}" ]]; then
     if is_should_fail "${t}"; then
@@ -340,6 +363,18 @@ while IFS= read -r t; do
     fi
     echo "[nogold] ${t} (expected ${gold_vcd})"
     missing_gold=$((missing_gold+1))
+    continue
+  fi
+
+  if ! grep -Fq '$enddefinitions' "${gold_vcd}"; then
+    echo "[invalid-gold] ${t} (gold VCD missing \$enddefinitions; regenerate Questa gold)"
+    invalid_gold=$((invalid_gold+1))
+    continue
+  fi
+
+  if ! grep -Fq '$var' "${gold_vcd}"; then
+    echo "[empty-gold] ${t} (gold VCD has no dumped vars; skipping VCD diff)"
+    empty_gold=$((empty_gold+1))
     continue
   fi
 
@@ -368,9 +403,9 @@ while IFS= read -r t; do
 done <"${tmp_tests_file}"
 
 total="${num_tests}"
-echo "[summary] total=${total} match=${match} mismatch=${mismatch} no_common=${no_common} missing_arc=${missing_arc} missing_gold=${missing_gold} skipped_expected=${skipped_expected}"
+echo "[summary] total=${total} match=${match} mismatch=${mismatch} no_common=${no_common} missing_arc=${missing_arc} missing_gold=${missing_gold} invalid_gold=${invalid_gold} empty_gold=${empty_gold} skipped_expected=${skipped_expected}"
 
-if [[ "${mismatch}" -ne 0 || "${missing_arc}" -ne 0 || "${missing_gold}" -ne 0 ]]; then
+if [[ "${mismatch}" -ne 0 || "${missing_arc}" -ne 0 || "${missing_gold}" -ne 0 || "${invalid_gold}" -ne 0 ]]; then
   exit 1
 fi
 exit 0

@@ -235,6 +235,28 @@ test_params['incdirs'] = list(
         test_params['incdirs'].split()))
 
 test_params['mode'] = runner_obj.get_mode(test_params)
+
+# Optional mode override (useful for forcing simulation for benchmarking
+# without editing individual test metadata).
+forced_mode = os.environ.get("SVTESTS_FORCE_MODE", "").strip()
+if not forced_mode and _is_truthy_env("SVTESTS_FORCE_SIMULATION", default="0"):
+    forced_mode = "simulation"
+if forced_mode:
+    if forced_mode not in getattr(runner_obj, "supported_features", set()):
+        logger.error(
+            "SVTESTS_FORCE_MODE=%s is not supported by runner %s",
+            forced_mode,
+            runner_obj.name,
+        )
+        sys.exit(1)
+    if test_params['mode'] is None:
+        logger.warning(
+            "Forcing mode=%s for %s (runner would have skipped this test)",
+            forced_mode,
+            args.test,
+        )
+    test_params['mode'] = forced_mode
+
 if test_params['mode'] is None:
     logger.info("Skipping {}/{}".format(args.runner, args.test))
     with open(out, "w") as f:
@@ -276,6 +298,23 @@ uvm_testbench = (
     and "uvm" in test_params.get("tags", "")
     and _looks_like_uvm_testbench(user_files_for_uvm_m0)
 )
+
+# UVM VCD smoke: ensure there is always at least one VCD-visible signal under the
+# bound top module (particularly for class-only UVM smoke tests with no ports/nets).
+uvm_vcd_smoke_enabled = (
+    test_params['mode'] == "simulation"
+    and "uvm" in test_params.get("tags", "")
+    and _is_truthy_env("SVTESTS_UVM_VCD_SMOKE", default="1")
+)
+if uvm_vcd_smoke_enabled:
+    wrapper = os.path.abspath(
+        os.path.join(dirs['tests'], "support", "svtests_uvm_vcd_smoke.sv"))
+    test_params['files'].append(wrapper)
+    top_for_bind = test_params.get("top_module") or "top"
+    if not any(
+            d.startswith("SVTESTS_UVM_BIND_MODULE=")
+            for d in test_params['defines']):
+        test_params['defines'].append(f"SVTESTS_UVM_BIND_MODULE={top_for_bind}")
 
 # UVM M0: inject an end-of-sim UVM report check for real UVM testbenches.
 # Defaults to on; disable with SVTESTS_UVM_M0=0.

@@ -312,6 +312,7 @@ class arcilator(BaseRunner):
         header_path = os.path.join(tmp_dir, header_basename)
         model_obj_path = os.path.join(tmp_dir, "model.o")
         driver_cpp = os.path.join(tmp_dir, "driver.cpp")
+        runtime_cpp = os.path.join(tmp_dir, "arcilator_runtime.cpp")
         driver_bin = os.path.join(tmp_dir, "driver.bin")
         vcd_path = os.path.join(tmp_dir, "wave.vcd")
 
@@ -354,6 +355,8 @@ class arcilator(BaseRunner):
                 uvm_no_dpi = _is_truthy_str(raw_uvm_no_dpi)
             if uvm_no_dpi:
                 circt_cmd.append("-DUVM_NO_DPI")
+            if _is_truthy_env("ARCILATOR_UVM_SIMPLE_SEQ_START", default="1"):
+                circt_cmd.append("-DCIRCT_UVM_SIMPLE_SEQ_START")
             if not _is_truthy_env("ARCILATOR_ALLOW_CLASS_STUBS", default="0"):
                 circt_cmd.append("--allow-class-stubs=false")
 
@@ -696,6 +699,7 @@ class arcilator(BaseRunner):
                     header_path,
                     model_obj_path,
                     driver_cpp,
+                    runtime_cpp,
                     driver_bin,
                     vcd_path,
                 ):
@@ -804,6 +808,33 @@ class arcilator(BaseRunner):
                         script.write("  circt_rc=$?\n")
                         script.write('  echo "[stage] circt-verilog rc=${circt_rc}"\n')
                         script.write("  if [[ ${circt_rc} -ne 0 ]]; then unlock_cache; exit ${circt_rc}; fi\n")
+                        # The `moore.builtin.{urandom,random}` operations have an
+                        # optional seed operand and no mandatory trailing tokens.
+                        # When printed without a seed and without any attributes,
+                        # the next SSA value (%...) can be ambiguously parsed as
+                        # the optional seed, making the IR unparsable.
+                        #
+                        # Work around this by explicitly printing an empty
+                        # attribute dictionary `{}` for the no-seed form.
+                        script.write('  echo "[fix] patch moore.builtin.{urandom,random} no-seed syntax [cache]"\n')
+                        script.write(
+                            "  python3 - \"${CACHE_IR}\" <<'PY'\n"
+                            "import re\n"
+                            "import sys\n"
+                            "from pathlib import Path\n"
+                            "\n"
+                            "path = Path(sys.argv[1])\n"
+                            "try:\n"
+                            "  text = path.read_text(encoding='utf-8', errors='ignore')\n"
+                            "except OSError:\n"
+                            "  sys.exit(0)\n"
+                            "\n"
+                            "pattern = re.compile(r'^(\\s*%[^\\s=]+\\s*=\\s*moore\\.builtin\\.(?:urandom|random))\\s*$', re.M)\n"
+                            "fixed, n = pattern.subn(r'\\1 {}', text)\n"
+                            "if n:\n"
+                            "  path.write_text(fixed, encoding='utf-8')\n"
+                            "PY\n"
+                        )
 
                     script.write('  echo "[stage] arc pipeline (emit-mlir) [cache]"\n')
                     script.write("  " + arc_mlir_cmd_cache + "\n")
@@ -849,12 +880,307 @@ class arcilator(BaseRunner):
                     if mode == "elaboration":
                         script.write("exit 0\n")
 
+                    script.write('echo "[stage] gen-runtime (state.json -> arcilator_runtime.cpp)"\n')
+                    script.write(
+                        "python3 - "
+                        + shlex.quote(state_path)
+                        + " "
+                        + shlex.quote(runtime_cpp)
+                        + " "
+                        + shlex.quote(top or "")
+                        + " <<'PY'\n"
+                        "import json\n"
+                        "import pathlib\n"
+                        "import sys\n"
+                        "\n"
+                        "state_json, cpp_out, top_name = sys.argv[1:]\n"
+                        "models = json.loads(pathlib.Path(state_json).read_text())\n"
+                        "if not models:\n"
+                        "  sys.stderr.write(f\"empty state.json: {state_json}\\n\")\n"
+                        "  sys.exit(2)\n"
+                        "\n"
+                        "model = None\n"
+                        "if top_name:\n"
+                        "  for m in models:\n"
+                        "    if m.get(\"name\") == top_name:\n"
+                        "      model = m\n"
+                        "      break\n"
+                        "if model is None:\n"
+                        "  model = models[0]\n"
+                        "\n"
+                        "sig_inits_by_id = {}\n"
+                        "for entry in (model.get(\"sigInits\") or []):\n"
+                        "  if not isinstance(entry, dict):\n"
+                        "    continue\n"
+                        "  try:\n"
+                        "    sig_id = int(entry.get(\"sigId\", 0))\n"
+                        "    init_u64 = int(entry.get(\"initU64\", 0))\n"
+                        "  except Exception:\n"
+                        "    continue\n"
+                        "  if sig_id < 0:\n"
+                        "    continue\n"
+                        "  sig_inits_by_id[sig_id] = init_u64 & ((1 << 64) - 1)\n"
+                        "sig_init_items = sorted(sig_inits_by_id.items())\n"
+                        "\n"
+                        "lines = []\n"
+                        "lines += [\n"
+                        "  \"#include <cstddef>\",\n"
+                        "  \"#include <cstdint>\",\n"
+                        "  \"#include <vector>\",\n"
+                        "  \"\",\n"
+                        "  \"static uint64_t g_arcilator_now_fs = 0;\",\n"
+                        "  \"static std::vector<uint32_t> g_arcilator_proc_pc;\",\n"
+                        "  \"static std::vector<std::vector<uint64_t>> g_arcilator_proc_frame;\",\n"
+                        "  \"struct ArcilatorDelayWait { bool active = false; uint64_t targetFs = 0; };\",\n"
+                        "  \"struct ArcilatorChangeWait { bool active = false; uint64_t lastSig = 0; };\",\n"
+                        "  \"static std::vector<ArcilatorDelayWait> g_arcilator_delay_waits;\",\n"
+                        "  \"static std::vector<ArcilatorChangeWait> g_arcilator_change_waits;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_cur;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_next;\",\n"
+                        "  \"static std::vector<uint8_t> g_arcilator_sig_dirty_flag;\",\n"
+                        "  \"static std::vector<uint32_t> g_arcilator_sig_dirty;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_nba_mask;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_nba_value;\",\n"
+                        "  \"static std::vector<uint8_t> g_arcilator_sig_nba_dirty_flag;\",\n"
+                        "  \"static std::vector<uint32_t> g_arcilator_sig_nba_dirty;\",\n"
+                        "  \"static std::vector<std::vector<uint64_t>> g_arcilator_sig_local;\",\n"
+                        "  \"static std::vector<std::vector<uint8_t>> g_arcilator_sig_local_valid;\",\n"
+                        "  \"static std::vector<std::vector<uint32_t>> g_arcilator_sig_local_dirty;\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_proc_state(uint32_t procId) {\",\n"
+                        "  \"  if (g_arcilator_proc_pc.size() <= procId) g_arcilator_proc_pc.resize(procId + 1u, 0u);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_proc_frame(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  if (g_arcilator_proc_frame.size() <= procId) g_arcilator_proc_frame.resize(procId + 1u);\",\n"
+                        "  \"  if (g_arcilator_proc_frame[procId].size() <= slot)\",\n"
+                        "  \"    g_arcilator_proc_frame[procId].resize(static_cast<size_t>(slot) + 1u, 0ull);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_wait_state(uint32_t waitId) {\",\n"
+                        "  \"  if (g_arcilator_delay_waits.size() <= waitId) g_arcilator_delay_waits.resize(waitId + 1u);\",\n"
+                        "  \"  if (g_arcilator_change_waits.size() <= waitId) g_arcilator_change_waits.resize(waitId + 1u);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_sig_state(uint32_t sigId) {\",\n"
+                        "  \"  if (g_arcilator_sig_cur.size() <= sigId) {\",\n"
+                        "  \"    const size_t n = static_cast<size_t>(sigId) + 1u;\",\n"
+                        "  \"    // Initialize signals to X (all-ones) so 4-state values start unknown.\",\n"
+                        "  \"    // 2-state signals are expected to be driven to known values by the SV\",\n"
+                        "  \"    // initialization code at time 0.\",\n"
+                        "  \"    g_arcilator_sig_cur.resize(n, ~0ull);\",\n"
+                        "  \"    g_arcilator_sig_next.resize(n, ~0ull);\",\n"
+                        "  \"    g_arcilator_sig_dirty_flag.resize(n, 0u);\",\n"
+                        "  \"    g_arcilator_sig_nba_mask.resize(n, 0ull);\",\n"
+                        "  \"    g_arcilator_sig_nba_value.resize(n, 0ull);\",\n"
+                        "  \"    g_arcilator_sig_nba_dirty_flag.resize(n, 0u);\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_sig_local(uint32_t procId) {\",\n"
+                        "  \"  if (g_arcilator_sig_local.size() <= procId) {\",\n"
+                        "  \"    const size_t n = static_cast<size_t>(procId) + 1u;\",\n"
+                        "  \"    g_arcilator_sig_local.resize(n);\",\n"
+                        "  \"    g_arcilator_sig_local_valid.resize(n);\",\n"
+                        "  \"    g_arcilator_sig_local_dirty.resize(n);\",\n"
+                        "  \"  }\",\n"
+                        "  \"  const size_t sigs = g_arcilator_sig_cur.size();\",\n"
+                        "  \"  if (g_arcilator_sig_local[procId].size() < sigs) g_arcilator_sig_local[procId].resize(sigs, 0ull);\",\n"
+                        "  \"  if (g_arcilator_sig_local_valid[procId].size() < sigs) g_arcilator_sig_local_valid[procId].resize(sigs, 0u);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_now_fs() { return g_arcilator_now_fs; }\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint32_t __arcilator_get_pc(uint32_t procId) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  return g_arcilator_proc_pc[procId];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_set_pc(uint32_t procId, uint32_t pc) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  g_arcilator_proc_pc[procId] = pc;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_frame_load_u64(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_frame(procId, slot);\",\n"
+                        "  \"  return g_arcilator_proc_frame[procId][slot];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_frame_store_u64(uint32_t procId, uint32_t slot, uint64_t value) {\",\n"
+                        "  \"  ensure_proc_frame(procId, slot);\",\n"
+                        "  \"  g_arcilator_proc_frame[procId][slot] = value;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" bool __arcilator_wait_delay(uint32_t waitId, uint64_t delayFs) {\",\n"
+                        "  \"  ensure_wait_state(waitId);\",\n"
+                        "  \"  auto &w = g_arcilator_delay_waits[waitId];\",\n"
+                        "  \"  if (!w.active) {\",\n"
+                        "  \"    w.active = true;\",\n"
+                        "  \"    uint64_t target = 0;\",\n"
+                        "  \"    if (__builtin_add_overflow(g_arcilator_now_fs, delayFs, &target)) target = ~0ull;\",\n"
+                        "  \"    w.targetFs = target;\",\n"
+                        "  \"    return false;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (g_arcilator_now_fs >= w.targetFs) {\",\n"
+                        "  \"    w.active = false;\",\n"
+                        "  \"    return true;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return false;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" bool __arcilator_wait_change(uint32_t waitId, uint64_t sig) {\",\n"
+                        "  \"  ensure_wait_state(waitId);\",\n"
+                        "  \"  auto &w = g_arcilator_change_waits[waitId];\",\n"
+                        "  \"  if (!w.active) {\",\n"
+                        "  \"    w.active = true;\",\n"
+                        "  \"    w.lastSig = sig;\",\n"
+                        "  \"    return false;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (sig != w.lastSig) {\",\n"
+                        "  \"    w.active = false;\",\n"
+                        "  \"    w.lastSig = sig;\",\n"
+                        "  \"    return true;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return false;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_sig_load_u64(uint32_t sigId, uint32_t procId) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  if (procId != 0xFFFFFFFFu) {\",\n"
+                        "  \"    ensure_sig_local(procId);\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_local_valid[procId].size() && g_arcilator_sig_local_valid[procId][sigId])\",\n"
+                        "  \"      return g_arcilator_sig_local[procId][sigId];\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (sigId < g_arcilator_sig_dirty_flag.size() && g_arcilator_sig_dirty_flag[sigId])\",\n"
+                        "  \"    return g_arcilator_sig_next[sigId];\",\n"
+                        "  \"  return g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_sig_load_nba_u64(uint32_t sigId, uint32_t /*procId*/) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  uint64_t base = g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"  if (sigId < g_arcilator_sig_dirty_flag.size() && g_arcilator_sig_dirty_flag[sigId])\",\n"
+                        "  \"    base = g_arcilator_sig_next[sigId];\",\n"
+                        "  \"  if (sigId < g_arcilator_sig_nba_dirty_flag.size() && g_arcilator_sig_nba_dirty_flag[sigId]) {\",\n"
+                        "  \"    const uint64_t mask = g_arcilator_sig_nba_mask[sigId];\",\n"
+                        "  \"    base = (base & ~mask) | (g_arcilator_sig_nba_value[sigId] & mask);\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return base;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_sig_read_u64(uint32_t sigId, uint32_t /*procId*/) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  return g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_sig_store_u64(uint32_t sigId, uint64_t value, uint32_t procId) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  g_arcilator_sig_next[sigId] = value;\",\n"
+                        "  \"  if (!g_arcilator_sig_dirty_flag[sigId]) {\",\n"
+                        "  \"    g_arcilator_sig_dirty_flag[sigId] = 1u;\",\n"
+                        "  \"    g_arcilator_sig_dirty.push_back(sigId);\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (procId != 0xFFFFFFFFu) {\",\n"
+                        "  \"    ensure_sig_local(procId);\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_local[procId].size()) g_arcilator_sig_local[procId][sigId] = value;\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_local_valid[procId].size()) {\",\n"
+                        "  \"      if (!g_arcilator_sig_local_valid[procId][sigId]) {\",\n"
+                        "  \"        g_arcilator_sig_local_valid[procId][sigId] = 1u;\",\n"
+                        "  \"        g_arcilator_sig_local_dirty[procId].push_back(sigId);\",\n"
+                        "  \"      }\",\n"
+                        "  \"    }\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_sig_store_nba_masked_u64(uint32_t sigId, uint64_t mask, uint64_t value, uint32_t /*procId*/) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  if (mask == 0ull) return;\",\n"
+                        "  \"  g_arcilator_sig_nba_value[sigId] = (g_arcilator_sig_nba_value[sigId] & ~mask) | (value & mask);\",\n"
+                        "  \"  g_arcilator_sig_nba_mask[sigId] |= mask;\",\n"
+                        "  \"  if (!g_arcilator_sig_nba_dirty_flag[sigId]) {\",\n"
+                        "  \"    g_arcilator_sig_nba_dirty_flag[sigId] = 1u;\",\n"
+                        "  \"    g_arcilator_sig_nba_dirty.push_back(sigId);\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_sig_store_nba_u64(uint32_t sigId, uint64_t value, uint32_t procId) {\",\n"
+                        "  \"  __arcilator_sig_store_nba_masked_u64(sigId, ~0ull, value, procId);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" bool __arcilator_sig_commit() {\",\n"
+                        "  \"  bool changed = false;\",\n"
+                        "  \"  for (uint32_t sigId : g_arcilator_sig_dirty) {\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_cur.size()) {\",\n"
+                        "  \"      const uint64_t next = g_arcilator_sig_next[sigId];\",\n"
+                        "  \"      if (g_arcilator_sig_cur[sigId] != next) changed = true;\",\n"
+                        "  \"      g_arcilator_sig_cur[sigId] = next;\",\n"
+                        "  \"    }\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_dirty_flag.size()) g_arcilator_sig_dirty_flag[sigId] = 0u;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  g_arcilator_sig_dirty.clear();\",\n"
+                        "  \"  for (uint32_t sigId : g_arcilator_sig_nba_dirty) {\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_cur.size()) {\",\n"
+                        "  \"      const uint64_t mask = (sigId < g_arcilator_sig_nba_mask.size()) ? g_arcilator_sig_nba_mask[sigId] : 0ull;\",\n"
+                        "  \"      if (mask != 0ull) {\",\n"
+                        "  \"        const uint64_t before = g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"        const uint64_t after = (before & ~mask) | (g_arcilator_sig_nba_value[sigId] & mask);\",\n"
+                        "  \"        if (before != after) changed = true;\",\n"
+                        "  \"        g_arcilator_sig_cur[sigId] = after;\",\n"
+                        "  \"        if (sigId < g_arcilator_sig_next.size()) g_arcilator_sig_next[sigId] = after;\",\n"
+                        "  \"      }\",\n"
+                        "  \"    }\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_nba_mask.size()) g_arcilator_sig_nba_mask[sigId] = 0ull;\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_nba_value.size()) g_arcilator_sig_nba_value[sigId] = 0ull;\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_nba_dirty_flag.size()) g_arcilator_sig_nba_dirty_flag[sigId] = 0u;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  g_arcilator_sig_nba_dirty.clear();\",\n"
+                        "  \"  for (size_t p = 0; p < g_arcilator_sig_local_dirty.size(); ++p) {\",\n"
+                        "  \"    for (uint32_t sigId : g_arcilator_sig_local_dirty[p]) {\",\n"
+                        "  \"      if (p < g_arcilator_sig_local_valid.size() && sigId < g_arcilator_sig_local_valid[p].size())\",\n"
+                        "  \"        g_arcilator_sig_local_valid[p][sigId] = 0u;\",\n"
+                        "  \"    }\",\n"
+                        "  \"    g_arcilator_sig_local_dirty[p].clear();\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return changed;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"struct ArcilatorSigInit { uint32_t sigId; uint64_t value; };\",\n"
+                        "  \"static const ArcilatorSigInit kArcilatorSigInits[] = {\",\n"
+                        "]\n"
+                        "\n"
+                        "for sig_id, init_u64 in sig_init_items:\n"
+                        "  lines.append(f\"  {{{sig_id}u, {init_u64}ull}},\")\n"
+                        "\n"
+                        "lines += [\n"
+                        "  \"};\",\n"
+                        "  \"\",\n"
+                        "  \"static void arcilator_seed_sig_inits() {\",\n"
+                        "  \"  for (const auto &it : kArcilatorSigInits) {\",\n"
+                        "  \"    ensure_sig_state(it.sigId);\",\n"
+                        "  \"    g_arcilator_sig_cur[it.sigId] = it.value;\",\n"
+                        "  \"    g_arcilator_sig_next[it.sigId] = it.value;\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"struct ArcilatorAutoInit { ArcilatorAutoInit() { arcilator_seed_sig_inits(); } };\",\n"
+                        "  \"static ArcilatorAutoInit g_arcilator_auto_init;\",\n"
+                        "]\n"
+                        "\n"
+                        "pathlib.Path(cpp_out).write_text(\"\\n\".join(lines) + \"\\n\")\n"
+                        "PY\n"
+                    )
+                    script.write("rt_rc=$?\n")
+                    script.write('echo "[stage] gen-runtime rc=${rt_rc}"\n')
+                    script.write("if [[ ${rt_rc} -ne 0 ]]; then exit ${rt_rc}; fi\n")
+
                     script.write('echo "[stage] clang++ (custom driver)"\n')
                     compile_cmd = (
-                        [cxx, "-std=c++17"]
+                        [cxx, "-std=c++17", "-O3"]
                         + driver_cxxflags
                         + [model_obj_path]
                         + driver_sources
+                        + [runtime_cpp]
                         + [f"-I{self._runtime_inc}", f"-I{tmp_dir}"]
                         + [f"-I{d}" for d in driver_incdirs]
                         + ["-o", driver_bin]
@@ -892,6 +1218,29 @@ class arcilator(BaseRunner):
                         script.write("circt_rc=$?\n")
                         script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
                         script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
+                        # See cache-mode comment above: patch ambiguous no-seed
+                        # `moore.builtin.{urandom,random}` prints so the IR parses.
+                        script.write('echo "[fix] patch moore.builtin.{urandom,random} no-seed syntax"\n')
+                        script.write(
+                            "python3 - "
+                            + shlex.quote(ir_path)
+                            + " <<'PY'\n"
+                            "import re\n"
+                            "import sys\n"
+                            "from pathlib import Path\n"
+                            "\n"
+                            "path = Path(sys.argv[1])\n"
+                            "try:\n"
+                            "  text = path.read_text(encoding='utf-8', errors='ignore')\n"
+                            "except OSError:\n"
+                            "  sys.exit(0)\n"
+                            "\n"
+                            "pattern = re.compile(r'^(\\s*%[^\\s=]+\\s*=\\s*moore\\.builtin\\.(?:urandom|random))\\s*$', re.M)\n"
+                            "fixed, n = pattern.subn(r'\\1 {}', text)\n"
+                            "if n:\n"
+                            "  path.write_text(fixed, encoding='utf-8')\n"
+                            "PY\n"
+                        )
 
                         # For sv-tests `:type: elaboration` runs, treat success
                         # as "front-end elaboration succeeded" and stop after
@@ -951,12 +1300,307 @@ class arcilator(BaseRunner):
                     script.write('echo "[stage] model.o rc=${obj_rc}"\n')
                     script.write("if [[ ${obj_rc} -ne 0 ]]; then exit ${obj_rc}; fi\n")
 
+                    script.write('echo "[stage] gen-runtime (state.json -> arcilator_runtime.cpp)"\n')
+                    script.write(
+                        "python3 - "
+                        + shlex.quote(state_path)
+                        + " "
+                        + shlex.quote(runtime_cpp)
+                        + " "
+                        + shlex.quote(top or "")
+                        + " <<'PY'\n"
+                        "import json\n"
+                        "import pathlib\n"
+                        "import sys\n"
+                        "\n"
+                        "state_json, cpp_out, top_name = sys.argv[1:]\n"
+                        "models = json.loads(pathlib.Path(state_json).read_text())\n"
+                        "if not models:\n"
+                        "  sys.stderr.write(f\"empty state.json: {state_json}\\n\")\n"
+                        "  sys.exit(2)\n"
+                        "\n"
+                        "model = None\n"
+                        "if top_name:\n"
+                        "  for m in models:\n"
+                        "    if m.get(\"name\") == top_name:\n"
+                        "      model = m\n"
+                        "      break\n"
+                        "if model is None:\n"
+                        "  model = models[0]\n"
+                        "\n"
+                        "sig_inits_by_id = {}\n"
+                        "for entry in (model.get(\"sigInits\") or []):\n"
+                        "  if not isinstance(entry, dict):\n"
+                        "    continue\n"
+                        "  try:\n"
+                        "    sig_id = int(entry.get(\"sigId\", 0))\n"
+                        "    init_u64 = int(entry.get(\"initU64\", 0))\n"
+                        "  except Exception:\n"
+                        "    continue\n"
+                        "  if sig_id < 0:\n"
+                        "    continue\n"
+                        "  sig_inits_by_id[sig_id] = init_u64 & ((1 << 64) - 1)\n"
+                        "sig_init_items = sorted(sig_inits_by_id.items())\n"
+                        "\n"
+                        "lines = []\n"
+                        "lines += [\n"
+                        "  \"#include <cstddef>\",\n"
+                        "  \"#include <cstdint>\",\n"
+                        "  \"#include <vector>\",\n"
+                        "  \"\",\n"
+                        "  \"static uint64_t g_arcilator_now_fs = 0;\",\n"
+                        "  \"static std::vector<uint32_t> g_arcilator_proc_pc;\",\n"
+                        "  \"static std::vector<std::vector<uint64_t>> g_arcilator_proc_frame;\",\n"
+                        "  \"struct ArcilatorDelayWait { bool active = false; uint64_t targetFs = 0; };\",\n"
+                        "  \"struct ArcilatorChangeWait { bool active = false; uint64_t lastSig = 0; };\",\n"
+                        "  \"static std::vector<ArcilatorDelayWait> g_arcilator_delay_waits;\",\n"
+                        "  \"static std::vector<ArcilatorChangeWait> g_arcilator_change_waits;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_cur;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_next;\",\n"
+                        "  \"static std::vector<uint8_t> g_arcilator_sig_dirty_flag;\",\n"
+                        "  \"static std::vector<uint32_t> g_arcilator_sig_dirty;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_nba_mask;\",\n"
+                        "  \"static std::vector<uint64_t> g_arcilator_sig_nba_value;\",\n"
+                        "  \"static std::vector<uint8_t> g_arcilator_sig_nba_dirty_flag;\",\n"
+                        "  \"static std::vector<uint32_t> g_arcilator_sig_nba_dirty;\",\n"
+                        "  \"static std::vector<std::vector<uint64_t>> g_arcilator_sig_local;\",\n"
+                        "  \"static std::vector<std::vector<uint8_t>> g_arcilator_sig_local_valid;\",\n"
+                        "  \"static std::vector<std::vector<uint32_t>> g_arcilator_sig_local_dirty;\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_proc_state(uint32_t procId) {\",\n"
+                        "  \"  if (g_arcilator_proc_pc.size() <= procId) g_arcilator_proc_pc.resize(procId + 1u, 0u);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_proc_frame(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  if (g_arcilator_proc_frame.size() <= procId) g_arcilator_proc_frame.resize(procId + 1u);\",\n"
+                        "  \"  if (g_arcilator_proc_frame[procId].size() <= slot)\",\n"
+                        "  \"    g_arcilator_proc_frame[procId].resize(static_cast<size_t>(slot) + 1u, 0ull);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_wait_state(uint32_t waitId) {\",\n"
+                        "  \"  if (g_arcilator_delay_waits.size() <= waitId) g_arcilator_delay_waits.resize(waitId + 1u);\",\n"
+                        "  \"  if (g_arcilator_change_waits.size() <= waitId) g_arcilator_change_waits.resize(waitId + 1u);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_sig_state(uint32_t sigId) {\",\n"
+                        "  \"  if (g_arcilator_sig_cur.size() <= sigId) {\",\n"
+                        "  \"    const size_t n = static_cast<size_t>(sigId) + 1u;\",\n"
+                        "  \"    // Initialize signals to X (all-ones) so 4-state values start unknown.\",\n"
+                        "  \"    // 2-state signals are expected to be driven to known values by the SV\",\n"
+                        "  \"    // initialization code at time 0.\",\n"
+                        "  \"    g_arcilator_sig_cur.resize(n, ~0ull);\",\n"
+                        "  \"    g_arcilator_sig_next.resize(n, ~0ull);\",\n"
+                        "  \"    g_arcilator_sig_dirty_flag.resize(n, 0u);\",\n"
+                        "  \"    g_arcilator_sig_nba_mask.resize(n, 0ull);\",\n"
+                        "  \"    g_arcilator_sig_nba_value.resize(n, 0ull);\",\n"
+                        "  \"    g_arcilator_sig_nba_dirty_flag.resize(n, 0u);\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_sig_local(uint32_t procId) {\",\n"
+                        "  \"  if (g_arcilator_sig_local.size() <= procId) {\",\n"
+                        "  \"    const size_t n = static_cast<size_t>(procId) + 1u;\",\n"
+                        "  \"    g_arcilator_sig_local.resize(n);\",\n"
+                        "  \"    g_arcilator_sig_local_valid.resize(n);\",\n"
+                        "  \"    g_arcilator_sig_local_dirty.resize(n);\",\n"
+                        "  \"  }\",\n"
+                        "  \"  const size_t sigs = g_arcilator_sig_cur.size();\",\n"
+                        "  \"  if (g_arcilator_sig_local[procId].size() < sigs) g_arcilator_sig_local[procId].resize(sigs, 0ull);\",\n"
+                        "  \"  if (g_arcilator_sig_local_valid[procId].size() < sigs) g_arcilator_sig_local_valid[procId].resize(sigs, 0u);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_now_fs() { return g_arcilator_now_fs; }\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint32_t __arcilator_get_pc(uint32_t procId) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  return g_arcilator_proc_pc[procId];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_set_pc(uint32_t procId, uint32_t pc) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  g_arcilator_proc_pc[procId] = pc;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_frame_load_u64(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_frame(procId, slot);\",\n"
+                        "  \"  return g_arcilator_proc_frame[procId][slot];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_frame_store_u64(uint32_t procId, uint32_t slot, uint64_t value) {\",\n"
+                        "  \"  ensure_proc_frame(procId, slot);\",\n"
+                        "  \"  g_arcilator_proc_frame[procId][slot] = value;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" bool __arcilator_wait_delay(uint32_t waitId, uint64_t delayFs) {\",\n"
+                        "  \"  ensure_wait_state(waitId);\",\n"
+                        "  \"  auto &w = g_arcilator_delay_waits[waitId];\",\n"
+                        "  \"  if (!w.active) {\",\n"
+                        "  \"    w.active = true;\",\n"
+                        "  \"    uint64_t target = 0;\",\n"
+                        "  \"    if (__builtin_add_overflow(g_arcilator_now_fs, delayFs, &target)) target = ~0ull;\",\n"
+                        "  \"    w.targetFs = target;\",\n"
+                        "  \"    return false;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (g_arcilator_now_fs >= w.targetFs) {\",\n"
+                        "  \"    w.active = false;\",\n"
+                        "  \"    return true;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return false;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" bool __arcilator_wait_change(uint32_t waitId, uint64_t sig) {\",\n"
+                        "  \"  ensure_wait_state(waitId);\",\n"
+                        "  \"  auto &w = g_arcilator_change_waits[waitId];\",\n"
+                        "  \"  if (!w.active) {\",\n"
+                        "  \"    w.active = true;\",\n"
+                        "  \"    w.lastSig = sig;\",\n"
+                        "  \"    return false;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (sig != w.lastSig) {\",\n"
+                        "  \"    w.active = false;\",\n"
+                        "  \"    w.lastSig = sig;\",\n"
+                        "  \"    return true;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return false;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_sig_load_u64(uint32_t sigId, uint32_t procId) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  if (procId != 0xFFFFFFFFu) {\",\n"
+                        "  \"    ensure_sig_local(procId);\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_local_valid[procId].size() && g_arcilator_sig_local_valid[procId][sigId])\",\n"
+                        "  \"      return g_arcilator_sig_local[procId][sigId];\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (sigId < g_arcilator_sig_dirty_flag.size() && g_arcilator_sig_dirty_flag[sigId])\",\n"
+                        "  \"    return g_arcilator_sig_next[sigId];\",\n"
+                        "  \"  return g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_sig_load_nba_u64(uint32_t sigId, uint32_t /*procId*/) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  uint64_t base = g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"  if (sigId < g_arcilator_sig_dirty_flag.size() && g_arcilator_sig_dirty_flag[sigId])\",\n"
+                        "  \"    base = g_arcilator_sig_next[sigId];\",\n"
+                        "  \"  if (sigId < g_arcilator_sig_nba_dirty_flag.size() && g_arcilator_sig_nba_dirty_flag[sigId]) {\",\n"
+                        "  \"    const uint64_t mask = g_arcilator_sig_nba_mask[sigId];\",\n"
+                        "  \"    base = (base & ~mask) | (g_arcilator_sig_nba_value[sigId] & mask);\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return base;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" uint64_t __arcilator_sig_read_u64(uint32_t sigId, uint32_t /*procId*/) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  return g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_sig_store_u64(uint32_t sigId, uint64_t value, uint32_t procId) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  g_arcilator_sig_next[sigId] = value;\",\n"
+                        "  \"  if (!g_arcilator_sig_dirty_flag[sigId]) {\",\n"
+                        "  \"    g_arcilator_sig_dirty_flag[sigId] = 1u;\",\n"
+                        "  \"    g_arcilator_sig_dirty.push_back(sigId);\",\n"
+                        "  \"  }\",\n"
+                        "  \"  if (procId != 0xFFFFFFFFu) {\",\n"
+                        "  \"    ensure_sig_local(procId);\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_local[procId].size()) g_arcilator_sig_local[procId][sigId] = value;\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_local_valid[procId].size()) {\",\n"
+                        "  \"      if (!g_arcilator_sig_local_valid[procId][sigId]) {\",\n"
+                        "  \"        g_arcilator_sig_local_valid[procId][sigId] = 1u;\",\n"
+                        "  \"        g_arcilator_sig_local_dirty[procId].push_back(sigId);\",\n"
+                        "  \"      }\",\n"
+                        "  \"    }\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_sig_store_nba_masked_u64(uint32_t sigId, uint64_t mask, uint64_t value, uint32_t /*procId*/) {\",\n"
+                        "  \"  ensure_sig_state(sigId);\",\n"
+                        "  \"  if (mask == 0ull) return;\",\n"
+                        "  \"  g_arcilator_sig_nba_value[sigId] = (g_arcilator_sig_nba_value[sigId] & ~mask) | (value & mask);\",\n"
+                        "  \"  g_arcilator_sig_nba_mask[sigId] |= mask;\",\n"
+                        "  \"  if (!g_arcilator_sig_nba_dirty_flag[sigId]) {\",\n"
+                        "  \"    g_arcilator_sig_nba_dirty_flag[sigId] = 1u;\",\n"
+                        "  \"    g_arcilator_sig_nba_dirty.push_back(sigId);\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_sig_store_nba_u64(uint32_t sigId, uint64_t value, uint32_t procId) {\",\n"
+                        "  \"  __arcilator_sig_store_nba_masked_u64(sigId, ~0ull, value, procId);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" bool __arcilator_sig_commit() {\",\n"
+                        "  \"  bool changed = false;\",\n"
+                        "  \"  for (uint32_t sigId : g_arcilator_sig_dirty) {\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_cur.size()) {\",\n"
+                        "  \"      const uint64_t next = g_arcilator_sig_next[sigId];\",\n"
+                        "  \"      if (g_arcilator_sig_cur[sigId] != next) changed = true;\",\n"
+                        "  \"      g_arcilator_sig_cur[sigId] = next;\",\n"
+                        "  \"    }\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_dirty_flag.size()) g_arcilator_sig_dirty_flag[sigId] = 0u;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  g_arcilator_sig_dirty.clear();\",\n"
+                        "  \"  for (uint32_t sigId : g_arcilator_sig_nba_dirty) {\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_cur.size()) {\",\n"
+                        "  \"      const uint64_t mask = (sigId < g_arcilator_sig_nba_mask.size()) ? g_arcilator_sig_nba_mask[sigId] : 0ull;\",\n"
+                        "  \"      if (mask != 0ull) {\",\n"
+                        "  \"        const uint64_t before = g_arcilator_sig_cur[sigId];\",\n"
+                        "  \"        const uint64_t after = (before & ~mask) | (g_arcilator_sig_nba_value[sigId] & mask);\",\n"
+                        "  \"        if (before != after) changed = true;\",\n"
+                        "  \"        g_arcilator_sig_cur[sigId] = after;\",\n"
+                        "  \"        if (sigId < g_arcilator_sig_next.size()) g_arcilator_sig_next[sigId] = after;\",\n"
+                        "  \"      }\",\n"
+                        "  \"    }\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_nba_mask.size()) g_arcilator_sig_nba_mask[sigId] = 0ull;\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_nba_value.size()) g_arcilator_sig_nba_value[sigId] = 0ull;\",\n"
+                        "  \"    if (sigId < g_arcilator_sig_nba_dirty_flag.size()) g_arcilator_sig_nba_dirty_flag[sigId] = 0u;\",\n"
+                        "  \"  }\",\n"
+                        "  \"  g_arcilator_sig_nba_dirty.clear();\",\n"
+                        "  \"  for (size_t p = 0; p < g_arcilator_sig_local_dirty.size(); ++p) {\",\n"
+                        "  \"    for (uint32_t sigId : g_arcilator_sig_local_dirty[p]) {\",\n"
+                        "  \"      if (p < g_arcilator_sig_local_valid.size() && sigId < g_arcilator_sig_local_valid[p].size())\",\n"
+                        "  \"        g_arcilator_sig_local_valid[p][sigId] = 0u;\",\n"
+                        "  \"    }\",\n"
+                        "  \"    g_arcilator_sig_local_dirty[p].clear();\",\n"
+                        "  \"  }\",\n"
+                        "  \"  return changed;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"struct ArcilatorSigInit { uint32_t sigId; uint64_t value; };\",\n"
+                        "  \"static const ArcilatorSigInit kArcilatorSigInits[] = {\",\n"
+                        "]\n"
+                        "\n"
+                        "for sig_id, init_u64 in sig_init_items:\n"
+                        "  lines.append(f\"  {{{sig_id}u, {init_u64}ull}},\")\n"
+                        "\n"
+                        "lines += [\n"
+                        "  \"};\",\n"
+                        "  \"\",\n"
+                        "  \"static void arcilator_seed_sig_inits() {\",\n"
+                        "  \"  for (const auto &it : kArcilatorSigInits) {\",\n"
+                        "  \"    ensure_sig_state(it.sigId);\",\n"
+                        "  \"    g_arcilator_sig_cur[it.sigId] = it.value;\",\n"
+                        "  \"    g_arcilator_sig_next[it.sigId] = it.value;\",\n"
+                        "  \"  }\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"struct ArcilatorAutoInit { ArcilatorAutoInit() { arcilator_seed_sig_inits(); } };\",\n"
+                        "  \"static ArcilatorAutoInit g_arcilator_auto_init;\",\n"
+                        "]\n"
+                        "\n"
+                        "pathlib.Path(cpp_out).write_text(\"\\n\".join(lines) + \"\\n\")\n"
+                        "PY\n"
+                    )
+                    script.write("rt_rc=$?\n")
+                    script.write('echo "[stage] gen-runtime rc=${rt_rc}"\n')
+                    script.write("if [[ ${rt_rc} -ne 0 ]]; then exit ${rt_rc}; fi\n")
+
                     script.write('echo "[stage] clang++ (custom driver)"\n')
                     compile_cmd = (
-                        [cxx, "-std=c++17"]
+                        [cxx, "-std=c++17", "-O3"]
                         + driver_cxxflags
                         + [model_obj_path]
                         + driver_sources
+                        + [runtime_cpp]
                         + [f"-I{self._runtime_inc}", f"-I{tmp_dir}"]
                         + [f"-I{d}" for d in driver_incdirs]
                         + ["-o", driver_bin]
@@ -993,6 +1637,29 @@ class arcilator(BaseRunner):
                 script.write("circt_rc=$?\n")
                 script.write('echo "[stage] circt-verilog rc=${circt_rc}"\n')
                 script.write("if [[ ${circt_rc} -ne 0 ]]; then exit ${circt_rc}; fi\n")
+                # Patch ambiguous no-seed `moore.builtin.{urandom,random}` prints
+                # (see comment in the linked-driver cache path above).
+                script.write('echo "[fix] patch moore.builtin.{urandom,random} no-seed syntax"\n')
+                script.write(
+                    "python3 - "
+                    + shlex.quote(ir_path)
+                    + " <<'PY'\n"
+                    "import re\n"
+                    "import sys\n"
+                    "from pathlib import Path\n"
+                    "\n"
+                    "path = Path(sys.argv[1])\n"
+                    "try:\n"
+                    "  text = path.read_text(encoding='utf-8', errors='ignore')\n"
+                    "except OSError:\n"
+                    "  sys.exit(0)\n"
+                    "\n"
+                    "pattern = re.compile(r'^(\\s*%[^\\s=]+\\s*=\\s*moore\\.builtin\\.(?:urandom|random))\\s*$', re.M)\n"
+                    "fixed, n = pattern.subn(r'\\1 {}', text)\n"
+                    "if n:\n"
+                    "  path.write_text(fixed, encoding='utf-8')\n"
+                    "PY\n"
+                )
 
             # For sv-tests `:type: elaboration` runs, treat success as "front-end
             # elaboration succeeded" and stop after import. This matches the
@@ -1822,6 +2489,10 @@ lines += [
   "static std::vector<uint64_t> g_arcilator_sig_next;",
   "static std::vector<uint8_t> g_arcilator_sig_dirty_flag;",
   "static std::vector<uint32_t> g_arcilator_sig_dirty;",
+  "static std::vector<uint64_t> g_arcilator_sig_nba_mask;",
+  "static std::vector<uint64_t> g_arcilator_sig_nba_value;",
+  "static std::vector<uint8_t> g_arcilator_sig_nba_dirty_flag;",
+  "static std::vector<uint32_t> g_arcilator_sig_nba_dirty;",
   "static std::vector<std::vector<uint64_t>> g_arcilator_sig_local;",
   "static std::vector<std::vector<uint8_t>> g_arcilator_sig_local_valid;",
   "",
@@ -1850,6 +2521,9 @@ lines += [
   "    g_arcilator_sig_cur.resize(n, ~0ull);",
   "    g_arcilator_sig_next.resize(n, ~0ull);",
   "    g_arcilator_sig_dirty_flag.resize(n, 0u);",
+  "    g_arcilator_sig_nba_mask.resize(n, 0ull);",
+  "    g_arcilator_sig_nba_value.resize(n, 0ull);",
+  "    g_arcilator_sig_nba_dirty_flag.resize(n, 0u);",
   "  }",
   "}",
   "",
@@ -1936,6 +2610,22 @@ lines += [
   "  return g_arcilator_sig_cur[sigId];",
   "}",
   "",
+  "extern \"C\" uint64_t __arcilator_sig_load_nba_u64(uint32_t sigId, uint32_t /*procId*/) {",
+  "  ensure_sig_state(sigId);",
+  "  // NBAs should not be visible to regular reads within the same delta cycle,",
+  "  // but masked/NBA stores need a stable base for bit-slice merging. Provide a",
+  "  // view that includes any pending blocking updates (dirty) and any queued",
+  "  // NBA masks for this signal.",
+  "  uint64_t base = g_arcilator_sig_cur[sigId];",
+  "  if (sigId < g_arcilator_sig_dirty_flag.size() && g_arcilator_sig_dirty_flag[sigId])",
+  "    base = g_arcilator_sig_next[sigId];",
+  "  if (sigId < g_arcilator_sig_nba_dirty_flag.size() && g_arcilator_sig_nba_dirty_flag[sigId]) {",
+  "    const uint64_t mask = g_arcilator_sig_nba_mask[sigId];",
+  "    base = (base & ~mask) | (g_arcilator_sig_nba_value[sigId] & mask);",
+  "  }",
+  "  return base;",
+  "}",
+  "",
   "extern \"C\" uint64_t __arcilator_sig_read_u64(uint32_t sigId, uint32_t /*procId*/) {",
   "  ensure_sig_state(sigId);",
   "  return g_arcilator_sig_cur[sigId];",
@@ -1955,6 +2645,24 @@ lines += [
   "  }",
   "}",
   "",
+  "extern \"C\" void __arcilator_sig_store_nba_masked_u64(uint32_t sigId, uint64_t mask, uint64_t value, uint32_t /*procId*/) {",
+  "  ensure_sig_state(sigId);",
+  "  if (mask == 0ull) return;",
+  "  // Queue an end-of-delta update for the specified bit mask. This preserves",
+  "  // SystemVerilog nonblocking assignment semantics for packed runtime signals,",
+  "  // including independent bit-slice updates from multiple processes.",
+  "  g_arcilator_sig_nba_value[sigId] = (g_arcilator_sig_nba_value[sigId] & ~mask) | (value & mask);",
+  "  g_arcilator_sig_nba_mask[sigId] |= mask;",
+  "  if (!g_arcilator_sig_nba_dirty_flag[sigId]) {",
+  "    g_arcilator_sig_nba_dirty_flag[sigId] = 1u;",
+  "    g_arcilator_sig_nba_dirty.push_back(sigId);",
+  "  }",
+  "}",
+  "",
+  "extern \"C\" void __arcilator_sig_store_nba_u64(uint32_t sigId, uint64_t value, uint32_t procId) {",
+  "  __arcilator_sig_store_nba_masked_u64(sigId, ~0ull, value, procId);",
+  "}",
+  "",
   "extern \"C\" bool __arcilator_sig_commit() {",
   "  bool changed = false;",
   "  for (uint32_t sigId : g_arcilator_sig_dirty) {",
@@ -1966,6 +2674,22 @@ lines += [
   "    if (sigId < g_arcilator_sig_dirty_flag.size()) g_arcilator_sig_dirty_flag[sigId] = 0u;",
   "  }",
   "  g_arcilator_sig_dirty.clear();",
+  "  for (uint32_t sigId : g_arcilator_sig_nba_dirty) {",
+  "    if (sigId < g_arcilator_sig_cur.size()) {",
+  "      const uint64_t mask = (sigId < g_arcilator_sig_nba_mask.size()) ? g_arcilator_sig_nba_mask[sigId] : 0ull;",
+  "      if (mask != 0ull) {",
+  "        const uint64_t before = g_arcilator_sig_cur[sigId];",
+  "        const uint64_t after = (before & ~mask) | (g_arcilator_sig_nba_value[sigId] & mask);",
+  "        if (before != after) changed = true;",
+  "        g_arcilator_sig_cur[sigId] = after;",
+  "        if (sigId < g_arcilator_sig_next.size()) g_arcilator_sig_next[sigId] = after;",
+  "      }",
+  "    }",
+  "    if (sigId < g_arcilator_sig_nba_mask.size()) g_arcilator_sig_nba_mask[sigId] = 0ull;",
+  "    if (sigId < g_arcilator_sig_nba_value.size()) g_arcilator_sig_nba_value[sigId] = 0ull;",
+  "    if (sigId < g_arcilator_sig_nba_dirty_flag.size()) g_arcilator_sig_nba_dirty_flag[sigId] = 0u;",
+  "  }",
+  "  g_arcilator_sig_nba_dirty.clear();",
   "  for (size_t p = 0; p < g_arcilator_sig_local_valid.size(); ++p) {",
   "    for (size_t s = 0; s < g_arcilator_sig_local_valid[p].size(); ++s) g_arcilator_sig_local_valid[p][s] = 0u;",
   "  }",

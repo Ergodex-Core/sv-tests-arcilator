@@ -38,9 +38,13 @@ module svtests_uvm_run_control;
     if (SVTESTS_FORCE_RUN_UNTIL > 0) begin : gen_force_finish
       initial begin
         #(SVTESTS_FORCE_RUN_UNTIL);
+        // Ensure $finish runs after all active events at this time (e.g. clock
+        // toggles) so the final VCD sample is not simulator-order dependent.
+        #0;
         // UVM should already be done by now for sane settings, but keep this
         // as a safety net so we don't cut off an active run.
         wait (uvm_root::get() != null && uvm_root::get().m_phase_all_done == 1);
+        #0;
         $finish;
       end
     end
