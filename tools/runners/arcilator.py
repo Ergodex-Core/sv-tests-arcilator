@@ -177,8 +177,23 @@ class arcilator(BaseRunner):
 
         # Directory that contains arcilator-runtime.h (included by generated headers).
         default_runtime_inc = third_party_arcilator_dir
-        if not os.path.isfile(os.path.join(default_runtime_inc, "arcilator-runtime.h")):
-            default_runtime_inc = self._bin_dir
+        runtime_hdr = os.path.join(default_runtime_inc, "arcilator-runtime.h")
+        # Prefer the in-tree headers, but fall back to the headers installed
+        # alongside the arcilator binary when the vendored runtime header is
+        # missing newer shims required by the generated model (e.g.
+        # `circt_sv_set_current_proc_id`).
+        needs_fallback = True
+        if os.path.isfile(runtime_hdr):
+            try:
+                with open(runtime_hdr, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+                needs_fallback = "circt_sv_set_current_proc_id" not in text
+            except OSError:
+                needs_fallback = True
+        if needs_fallback:
+            bin_runtime_hdr = os.path.join(self._bin_dir, "arcilator-runtime.h")
+            if os.path.isfile(bin_runtime_hdr):
+                default_runtime_inc = self._bin_dir
         self._runtime_inc = _abspath_or_empty(
             os.environ.get("ARCILATOR_RUNTIME_INC", default_runtime_inc)
         )

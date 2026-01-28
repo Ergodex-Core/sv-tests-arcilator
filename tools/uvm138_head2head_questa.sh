@@ -134,12 +134,11 @@ print(f"[common] {len(common)} tests")
 print(f"[pass] arcilator={sum(passed(arc[t]) for t in common)} questa={sum(passed(questa[t]) for t in common)}")
 print("")
 print("=== Questa PASS / Arcilator FAIL ===")
-print(\"\\n\".join(questa_only) if questa_only else \"(none)\")
+print("\n".join(questa_only) if questa_only else "(none)")
 print("")
 print("=== Arcilator PASS / Questa FAIL ===")
-print(\"\\n\".join(arc_only) if arc_only else \"(none)\")
+print("\n".join(arc_only) if arc_only else "(none)")
 
 if fail_on_gaps and questa_only:
     sys.exit(1)
 PY
-

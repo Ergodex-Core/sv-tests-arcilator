@@ -1,0 +1,31 @@
+# UVM138 tests whose Questa gold VCD is effectively "smoke-only".
+#
+# These tests were made VCD-diffable by the bound helper
+# `tests/support/svtests_uvm_vcd_smoke.sv`, but they do not have meaningful
+# DUT/module signals under `top` to compare waveforms against.
+#
+# Use this list with outcome-based checks (e.g. UVM M0 / :assert:), not waveform
+# parity.
+#
+# This list is the set difference:
+#   uvm138_questa_vcd_tests.txt \ uvm138_questa_vcd_tests_non_smoke.txt
+#
+generated/uvm_classes_0/uvm_agent_class_0.sv
+generated/uvm_classes_0/uvm_component_class_0.sv
+generated/uvm_classes_0/uvm_driver_class_0.sv
+generated/uvm_classes_0/uvm_env_class_0.sv
+generated/uvm_classes_0/uvm_monitor_class_0.sv
+generated/uvm_classes_0/uvm_scoreboard_class_0.sv
+generated/uvm_classes_0/uvm_sequencer_class_0.sv
+generated/uvm_classes_0/uvm_test_class_0.sv
+generated/uvm_classes_3/uvm_agent_class_3.sv
+generated/uvm_classes_3/uvm_component_class_3.sv
+generated/uvm_classes_3/uvm_driver_class_3.sv
+generated/uvm_classes_3/uvm_env_class_3.sv
+generated/uvm_classes_3/uvm_monitor_class_3.sv
+generated/uvm_classes_3/uvm_scoreboard_class_3.sv
+generated/uvm_classes_3/uvm_sequencer_class_3.sv
+generated/uvm_classes_3/uvm_test_class_3.sv
+testbenches/uvm_resource_db_read_by_name.sv
+testbenches/uvm_sequence.sv
+testbenches/uvm_test_run_test.sv
