@@ -51,50 +51,34 @@ interface output_if(input logic clk, input logic rst_n);
 endinterface
 
 module dut(input_if.dut in, output_if.dut out);
-    logic [7:0] fifo [0:`NUM_PKTS-1];
-    logic [5:0] wptr;
-    logic [5:0] rptr;
-
     always @(posedge in.clk) begin
         if (!in.rst_n) begin
-            wptr <= '0;
-            rptr <= '0;
-            in.ready <= 1'b0;
+            in.ready  <= 1'b0;
             out.valid <= 1'b0;
             out.data  <= 8'h00;
         end else begin
-            logic push;
-            logic pop;
-            logic [5:0] wptr_next;
-            logic [5:0] rptr_next;
-            logic have_next;
-
-            push = in.valid && (wptr < `NUM_PKTS);
-            pop = out.valid && out.ready;
-
-            in.ready <= (wptr < `NUM_PKTS);
-
-            if (push)
-                fifo[wptr] <= in.data;
-
-            wptr_next = wptr + push;
-            rptr_next = rptr + pop;
-            have_next = (rptr_next < wptr_next);
-
-            out.valid <= have_next;
-            if (have_next) begin
-                // If the FIFO was empty (or drained) and we push this cycle,
-                // the next element is the one we're writing now.
-                if (push && (rptr_next == wptr))
-                    out.data <= in.data;
-                else
-                    out.data <= fifo[rptr_next];
+            if (out.valid) begin
+                if (out.ready) begin
+                    // Pop.
+                    out.valid <= 1'b0;
+                    out.data  <= 8'h00;
+                    in.ready  <= 1'b1;
+                end else begin
+                    // Hold.
+                    in.ready <= 1'b0;
+                end
             end else begin
-                out.data <= 8'h00;
+                // Empty: accept if producer is presenting a new item.
+                if (in.valid) begin
+                    out.valid <= 1'b1;
+                    out.data  <= in.data;
+                    in.ready  <= 1'b0;
+                end else begin
+                    out.valid <= 1'b0;
+                    out.data  <= 8'h00;
+                    in.ready  <= 1'b1;
+                end
             end
-
-            wptr <= wptr_next;
-            rptr <= rptr_next;
         end
     end
 endmodule
@@ -158,9 +142,8 @@ class driver extends uvm_driver #(packet_in);
     endfunction
 
     virtual task run_phase(uvm_phase phase);
-        // Deterministic drive: insert per-item idle cycles and drive a
-        // single-cycle `valid` pulse per item. The DUT is buffered, so this
-        // avoids simulator-dependent ready/valid ordering effects.
+        // Deterministic drive: insert per-item idle cycles and hold `valid`
+        // until the DUT accepts the item.
         vif.valid <= 1'b0;
         vif.data  <= 8'h00;
 
@@ -174,7 +157,7 @@ class driver extends uvm_driver #(packet_in);
             vif.valid <= 1'b1;
             vif.data  <= req.data;
 
-            @(posedge vif.clk);
+            do @(posedge vif.clk); while (!vif.ready);
             vif.valid <= 1'b0;
             vif.data  <= 8'h00;
         end
