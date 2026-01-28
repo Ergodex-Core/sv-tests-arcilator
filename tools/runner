@@ -155,6 +155,7 @@ supported_test_params = [
 ]
 
 test_params = {}
+explicit_type_in_metadata = False
 
 # look for all supported params
 try:
@@ -175,6 +176,9 @@ try:
                         "Unsupported test param found: {} - ignoring".format(
                             param_name))
                     continue
+
+            if param_name == "type":
+                explicit_type_in_metadata = True
 
             test_params[param_name] = param_value
 
@@ -233,6 +237,16 @@ test_params['incdirs'] = list(
     map(
         lambda x: os.path.abspath(os.path.join(dirs['tests'], x)),
         test_params['incdirs'].split()))
+
+# Some UVM tests (notably class-only/randomization checks) historically omitted
+# an explicit `:type:`. sv-tests defaults missing `:type:` to
+# "parsing elaboration", which makes these tests non-simulation and therefore
+# vacuously PASS for runners that only compile/elaborate. If a test is UVM-tagged
+# and contains a `run_test(...)` entrypoint, treat it as simulation by default.
+if (not explicit_type_in_metadata and "uvm" in test_params.get("tags", "")
+        and _looks_like_uvm_testbench(test_params.get("files", []))
+        and "simulation" not in test_params.get("type", "").split()):
+    test_params["type"] = f"simulation {test_params['type']}".strip()
 
 test_params['mode'] = runner_obj.get_mode(test_params)
 
