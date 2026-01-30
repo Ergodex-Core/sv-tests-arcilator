@@ -1,0 +1,15 @@
+$date
+	Fri Jan 30 09:50:11 2026
+$end
+$version
+	Questa Altera Starter FPGA Edition Version 2025.2
+$end
+$timescale
+	1ns
+$end
+
+$scope module top $end
+
+$scope module svtests_uvm_vcd_smoke_inst $end
+$var reg 8 ! svtests_vcd_smoke_counter [7:0] $end
+$var reg 1 " svtests_vcd_smoke_done $end

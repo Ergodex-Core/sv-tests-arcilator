@@ -54,6 +54,8 @@ logger.addHandler(ch)
 runner_obj = None
 
 _UVM_TB_MARKER = "SVTESTS_UVM_M0_RAN"
+_UVM_SUMMARY_COUNT_RE = re.compile(
+    r"(?m)^\s*(?:#\s*)?UVM_(INFO|WARNING|ERROR|FATAL)\s*:\s*(\d+)\s*$")
 
 
 def _is_truthy_env(name: str, default: str = "0") -> bool:
@@ -88,6 +90,18 @@ def _looks_like_uvm_testbench(files) -> bool:
         except OSError:
             continue
     return False
+
+
+def _parse_uvm_report_summary_counts(output: str):
+    counts = {}
+    for m in _UVM_SUMMARY_COUNT_RE.finditer(output):
+        try:
+            counts[m.group(1).upper()] = int(m.group(2), 10)
+        except ValueError:
+            continue
+    if not counts:
+        return None
+    return counts
 
 if 'RUNNERS_DIR' in os.environ:
     sys.path.insert(1, os.path.abspath(os.environ['RUNNERS_DIR']))
@@ -445,6 +459,32 @@ try:
             f"\n[sv-tests] Missing {_UVM_TB_MARKER} marker from UVM M0 wrapper; "
             "testbench likely did not execute.\n"
             ":assert: (False)\n")
+
+    # UVM outcome: treat any UVM_ERROR/UVM_FATAL as failure, independent of
+    # whether the messages include explicit `:assert:` markers. Prefer parsing
+    # the UVM Report Summary, but fall back to counting report lines when the
+    # summary is absent.
+    uvm_outcome_assert_enabled = (
+        uvm_testbench and not tool_should_fail and _is_truthy_env(
+            "SVTESTS_UVM_OUTCOME_ASSERT", default="1"))
+    if uvm_outcome_assert_enabled and test_params['mode'] == 'simulation':
+        counts = _parse_uvm_report_summary_counts(output)
+        if counts is not None:
+            uvm_errors = counts.get("ERROR", 0)
+            uvm_fatals = counts.get("FATAL", 0)
+        else:
+            # Match only report lines like:
+            #   "UVM_ERROR <file>(<line>) ..." (not summary lines "UVM_ERROR : 0").
+            uvm_errors = len(
+                re.findall(
+                    r"(?m)^\s*(?:#\s*)?UVM_ERROR\b(?!\s*:)", output))
+            uvm_fatals = len(
+                re.findall(
+                    r"(?m)^\s*(?:#\s*)?UVM_FATAL\b(?!\s*:)", output))
+
+        output += f"\nSVTESTS_UVM_OUTCOME_ERRORS={uvm_errors}\n"
+        output += f"SVTESTS_UVM_OUTCOME_FATALS={uvm_fatals}\n"
+        output += f":assert: ({uvm_errors + uvm_fatals} == 0)\n"
 
     if test_passed and test_params['mode'] == 'simulation':
         test_passed = parseLog(output)

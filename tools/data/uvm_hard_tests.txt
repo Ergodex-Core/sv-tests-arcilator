@@ -1,0 +1,23 @@
+# Curated “hard UVM” tests for UVM-level (outcome) head-to-head.
+#
+# Run with:
+#   cd sv-tests && ./tools/uvm_hard_head2head_verilator.sh
+#
+# NOTE: This list is intended for outcome parity (UVM M0 / :assert:), not VCD.
+
+testbenches/uvm_hard_seq_scoreboard_env.sv
+testbenches/uvm_hard_random_constraints.sv
+
+# Known arcilator gap today (undefined uvm_pkg::uvm_factory symbols):
+# testbenches/uvm_hard_factory_override.sv
+
+# Existing stable UVM benches (exercise interfaces + TLM + scoreboards).
+testbenches/uvm_scoreboard_env.sv
+testbenches/uvm_scoreboard_monitor_env.sv
+testbenches/uvm_scoreboard_monitor_agent_env.sv
+
+# Deterministic driver/seq fuzz bench (DUT-visible, but scored via UVM outcome).
+testbenches/uvm_driver_sequencer_env_fuzzed.sv
+
+# Class-only constraint smoke (no DUT signals; outcome-based).
+chapter-18/18.5.8.2--array-reduction-iterative-constraints_1.sv

@@ -946,6 +946,7 @@ class arcilator(BaseRunner):
                         "  \"static uint64_t g_arcilator_now_fs = 0;\",\n"
                         "  \"static std::vector<uint32_t> g_arcilator_proc_pc;\",\n"
                         "  \"static std::vector<std::vector<uint64_t>> g_arcilator_proc_frame;\",\n"
+                        "  \"static std::vector<std::vector<const char *>> g_arcilator_proc_frame_str;\",\n"
                         "  \"struct ArcilatorDelayWait { bool active = false; uint64_t targetFs = 0; };\",\n"
                         "  \"struct ArcilatorChangeWait { bool active = false; uint64_t lastSig = 0; };\",\n"
                         "  \"static std::vector<ArcilatorDelayWait> g_arcilator_delay_waits;\",\n"
@@ -971,6 +972,13 @@ class arcilator(BaseRunner):
                         "  \"  if (g_arcilator_proc_frame.size() <= procId) g_arcilator_proc_frame.resize(procId + 1u);\",\n"
                         "  \"  if (g_arcilator_proc_frame[procId].size() <= slot)\",\n"
                         "  \"    g_arcilator_proc_frame[procId].resize(static_cast<size_t>(slot) + 1u, 0ull);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_proc_frame_str(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  if (g_arcilator_proc_frame_str.size() <= procId) g_arcilator_proc_frame_str.resize(procId + 1u);\",\n"
+                        "  \"  if (g_arcilator_proc_frame_str[procId].size() <= slot)\",\n"
+                        "  \"    g_arcilator_proc_frame_str[procId].resize(static_cast<size_t>(slot) + 1u, nullptr);\",\n"
                         "  \"}\",\n"
                         "  \"\",\n"
                         "  \"static void ensure_wait_state(uint32_t waitId) {\",\n"
@@ -1025,6 +1033,17 @@ class arcilator(BaseRunner):
                         "  \"extern \\\"C\\\" void __arcilator_frame_store_u64(uint32_t procId, uint32_t slot, uint64_t value) {\",\n"
                         "  \"  ensure_proc_frame(procId, slot);\",\n"
                         "  \"  g_arcilator_proc_frame[procId][slot] = value;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" const char * __arcilator_frame_load_str(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_frame_str(procId, slot);\",\n"
+                        "  \"  const char *value = g_arcilator_proc_frame_str[procId][slot];\",\n"
+                        "  \"  return value ? value : \\\"\\\";\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_frame_store_str(uint32_t procId, uint32_t slot, const char *value) {\",\n"
+                        "  \"  ensure_proc_frame_str(procId, slot);\",\n"
+                        "  \"  g_arcilator_proc_frame_str[procId][slot] = value ? value : \\\"\\\";\",\n"
                         "  \"}\",\n"
                         "  \"\",\n"
                         "  \"extern \\\"C\\\" bool __arcilator_wait_delay(uint32_t waitId, uint64_t delayFs) {\",\n"
@@ -1366,6 +1385,7 @@ class arcilator(BaseRunner):
                         "  \"static uint64_t g_arcilator_now_fs = 0;\",\n"
                         "  \"static std::vector<uint32_t> g_arcilator_proc_pc;\",\n"
                         "  \"static std::vector<std::vector<uint64_t>> g_arcilator_proc_frame;\",\n"
+                        "  \"static std::vector<std::vector<const char *>> g_arcilator_proc_frame_str;\",\n"
                         "  \"struct ArcilatorDelayWait { bool active = false; uint64_t targetFs = 0; };\",\n"
                         "  \"struct ArcilatorChangeWait { bool active = false; uint64_t lastSig = 0; };\",\n"
                         "  \"static std::vector<ArcilatorDelayWait> g_arcilator_delay_waits;\",\n"
@@ -1391,6 +1411,13 @@ class arcilator(BaseRunner):
                         "  \"  if (g_arcilator_proc_frame.size() <= procId) g_arcilator_proc_frame.resize(procId + 1u);\",\n"
                         "  \"  if (g_arcilator_proc_frame[procId].size() <= slot)\",\n"
                         "  \"    g_arcilator_proc_frame[procId].resize(static_cast<size_t>(slot) + 1u, 0ull);\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"static void ensure_proc_frame_str(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_state(procId);\",\n"
+                        "  \"  if (g_arcilator_proc_frame_str.size() <= procId) g_arcilator_proc_frame_str.resize(procId + 1u);\",\n"
+                        "  \"  if (g_arcilator_proc_frame_str[procId].size() <= slot)\",\n"
+                        "  \"    g_arcilator_proc_frame_str[procId].resize(static_cast<size_t>(slot) + 1u, nullptr);\",\n"
                         "  \"}\",\n"
                         "  \"\",\n"
                         "  \"static void ensure_wait_state(uint32_t waitId) {\",\n"
@@ -1445,6 +1472,17 @@ class arcilator(BaseRunner):
                         "  \"extern \\\"C\\\" void __arcilator_frame_store_u64(uint32_t procId, uint32_t slot, uint64_t value) {\",\n"
                         "  \"  ensure_proc_frame(procId, slot);\",\n"
                         "  \"  g_arcilator_proc_frame[procId][slot] = value;\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" const char * __arcilator_frame_load_str(uint32_t procId, uint32_t slot) {\",\n"
+                        "  \"  ensure_proc_frame_str(procId, slot);\",\n"
+                        "  \"  const char *value = g_arcilator_proc_frame_str[procId][slot];\",\n"
+                        "  \"  return value ? value : \\\"\\\";\",\n"
+                        "  \"}\",\n"
+                        "  \"\",\n"
+                        "  \"extern \\\"C\\\" void __arcilator_frame_store_str(uint32_t procId, uint32_t slot, const char *value) {\",\n"
+                        "  \"  ensure_proc_frame_str(procId, slot);\",\n"
+                        "  \"  g_arcilator_proc_frame_str[procId][slot] = value ? value : \\\"\\\";\",\n"
                         "  \"}\",\n"
                         "  \"\",\n"
                         "  \"extern \\\"C\\\" bool __arcilator_wait_delay(uint32_t waitId, uint64_t delayFs) {\",\n"
@@ -2496,6 +2534,7 @@ lines += [
   "static uint64_t g_arcilator_now_fs = 0;",
   "static std::vector<uint32_t> g_arcilator_proc_pc;",
   "static std::vector<std::vector<uint64_t>> g_arcilator_proc_frame;",
+  "static std::vector<std::vector<const char *>> g_arcilator_proc_frame_str;",
   "struct ArcilatorDelayWait { bool active = false; uint64_t targetFs = 0; };",
   "struct ArcilatorChangeWait { bool active = false; uint64_t lastSig = 0; };",
   "static std::vector<ArcilatorDelayWait> g_arcilator_delay_waits;",
@@ -2520,6 +2559,13 @@ lines += [
   "  if (g_arcilator_proc_frame.size() <= procId) g_arcilator_proc_frame.resize(procId + 1u);",
   "  if (g_arcilator_proc_frame[procId].size() <= slot)",
   "    g_arcilator_proc_frame[procId].resize(static_cast<size_t>(slot) + 1u, 0ull);",
+  "}",
+  "",
+  "static void ensure_proc_frame_str(uint32_t procId, uint32_t slot) {",
+  "  ensure_proc_state(procId);",
+  "  if (g_arcilator_proc_frame_str.size() <= procId) g_arcilator_proc_frame_str.resize(procId + 1u);",
+  "  if (g_arcilator_proc_frame_str[procId].size() <= slot)",
+  "    g_arcilator_proc_frame_str[procId].resize(static_cast<size_t>(slot) + 1u, nullptr);",
   "}",
   "",
   "static void ensure_wait_state(uint32_t waitId) {",
@@ -2573,6 +2619,17 @@ lines += [
   "extern \"C\" void __arcilator_frame_store_u64(uint32_t procId, uint32_t slot, uint64_t value) {",
   "  ensure_proc_frame(procId, slot);",
   "  g_arcilator_proc_frame[procId][slot] = value;",
+  "}",
+  "",
+  "extern \"C\" const char * __arcilator_frame_load_str(uint32_t procId, uint32_t slot) {",
+  "  ensure_proc_frame_str(procId, slot);",
+  "  const char *value = g_arcilator_proc_frame_str[procId][slot];",
+  "  return value ? value : \"\";",
+  "}",
+  "",
+  "extern \"C\" void __arcilator_frame_store_str(uint32_t procId, uint32_t slot, const char *value) {",
+  "  ensure_proc_frame_str(procId, slot);",
+  "  g_arcilator_proc_frame_str[procId][slot] = value ? value : \"\";",
   "}",
   "",
   "extern \"C\" bool __arcilator_wait_delay(uint32_t waitId, uint64_t delayFs) {",
