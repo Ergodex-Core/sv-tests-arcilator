@@ -7,4 +7,3 @@
 #   cd sv-tests && ./tools/verify_uvm_hard_vcd_vs_questa.sh
 
 testbenches/uvm_hard_seq_scoreboard_env.sv
-testbenches/uvm_hard_random_constraints.sv

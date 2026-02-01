@@ -1229,6 +1229,19 @@ class arcilator(BaseRunner):
 
                     if mode == "simulation":
                         script.write('echo "[stage] run (driver.bin)"\n')
+                        script.write(
+                            "# Some UVM-heavy testbenches can generate very large eval() stack frames.\n"
+                            "# Raise the stack size limit to avoid SIGSEGV on deep/large stacks.\n"
+                            "ARC_STACK_KB=\"${ARCILATOR_STACK_KB:-65536}\"\n"
+                            "CUR_STACK_KB=\"$(ulimit -s 2>/dev/null || echo '')\"\n"
+                            "if [[ \"${ARC_STACK_KB}\" == \"unlimited\" ]]; then\n"
+                            "  ulimit -s unlimited || true\n"
+                            "elif [[ \"${CUR_STACK_KB}\" != \"unlimited\" && \"${CUR_STACK_KB}\" =~ ^[0-9]+$ && \"${ARC_STACK_KB}\" =~ ^[0-9]+$ ]]; then\n"
+                            "  if (( CUR_STACK_KB < ARC_STACK_KB )); then\n"
+                            "    ulimit -s \"${ARC_STACK_KB}\" || true\n"
+                            "  fi\n"
+                            "fi\n"
+                        )
                         script.write(self._format_cmd([driver_bin] + list(driver_args) + list(sim_args)) + "\n")
                         script.write("exit $?\n")
                     else:
@@ -1668,6 +1681,19 @@ class arcilator(BaseRunner):
 
                     if mode == "simulation":
                         script.write('echo "[stage] run (driver.bin)"\n')
+                        script.write(
+                            "# Some UVM-heavy testbenches can generate very large eval() stack frames.\n"
+                            "# Raise the stack size limit to avoid SIGSEGV on deep/large stacks.\n"
+                            "ARC_STACK_KB=\"${ARCILATOR_STACK_KB:-65536}\"\n"
+                            "CUR_STACK_KB=\"$(ulimit -s 2>/dev/null || echo '')\"\n"
+                            "if [[ \"${ARC_STACK_KB}\" == \"unlimited\" ]]; then\n"
+                            "  ulimit -s unlimited || true\n"
+                            "elif [[ \"${CUR_STACK_KB}\" != \"unlimited\" && \"${CUR_STACK_KB}\" =~ ^[0-9]+$ && \"${ARC_STACK_KB}\" =~ ^[0-9]+$ ]]; then\n"
+                            "  if (( CUR_STACK_KB < ARC_STACK_KB )); then\n"
+                            "    ulimit -s \"${ARC_STACK_KB}\" || true\n"
+                            "  fi\n"
+                            "fi\n"
+                        )
                         script.write(self._format_cmd([driver_bin] + list(driver_args) + list(sim_args)) + "\n")
                         script.write("exit $?\n")
                     else:
@@ -3540,6 +3566,19 @@ pathlib.Path(cpp_out).write_text("\n".join(lines) + "\n")
 
                     if mode == "simulation":
                         script.write('echo "[stage] run (driver.bin)"\n')
+                        script.write(
+                            "# Some UVM-heavy testbenches can generate very large eval() stack frames.\n"
+                            "# Raise the stack size limit to avoid SIGSEGV on deep/large stacks.\n"
+                            "ARC_STACK_KB=\"${ARCILATOR_STACK_KB:-65536}\"\n"
+                            "CUR_STACK_KB=\"$(ulimit -s 2>/dev/null || echo '')\"\n"
+                            "if [[ \"${ARC_STACK_KB}\" == \"unlimited\" ]]; then\n"
+                            "  ulimit -s unlimited || true\n"
+                            "elif [[ \"${CUR_STACK_KB}\" != \"unlimited\" && \"${CUR_STACK_KB}\" =~ ^[0-9]+$ && \"${ARC_STACK_KB}\" =~ ^[0-9]+$ ]]; then\n"
+                            "  if (( CUR_STACK_KB < ARC_STACK_KB )); then\n"
+                            "    ulimit -s \"${ARC_STACK_KB}\" || true\n"
+                            "  fi\n"
+                            "fi\n"
+                        )
                         script.write(self._format_cmd([driver_bin, vcd_path] + list(sim_args)) + "\n")
                         script.write("exit $?\n")
                     else:
